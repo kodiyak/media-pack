@@ -113,3 +113,4 @@ function toErrorMessage(error: unknown): string {
 }
 
 console.log("[media-pack] offscreen pronto");
+sendWithoutResponse({ type: "streams.ready" });

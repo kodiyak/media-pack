@@ -77,3 +77,13 @@ export const streamProgressMessageSchema = z.object({
   subTotal: z.number().int().positive(),
 });
 export type StreamProgressMessage = z.infer<typeof streamProgressMessageSchema>;
+
+export const offscreenReadyMessageSchema = z.object({
+  type: z.literal("streams.ready"),
+});
+export type OffscreenReadyMessage = z.infer<typeof offscreenReadyMessageSchema>;
+
+export const offscreenCloseMessageSchema = z.object({
+  type: z.literal("streams.close"),
+});
+export type OffscreenCloseMessage = z.infer<typeof offscreenCloseMessageSchema>;

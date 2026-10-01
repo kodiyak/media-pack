@@ -3,6 +3,8 @@ import {
   type ClassifiedMedia,
   type MediaItem,
   mediaItemSchema,
+  offscreenCloseMessageSchema,
+  offscreenReadyMessageSchema,
   type StreamCancelRequest,
   type StreamPrepareRequest,
   streamCancelRequestSchema,
@@ -22,7 +24,6 @@ const knownRenditionUrls = new Set<string>();
 
 type TabInfo = { url?: string; title?: string };
 
-type OffscreenContext = { contextType?: string; documentUrl?: string };
 type OffscreenApi = {
   createDocument(options: {
     url: string;
@@ -31,42 +32,39 @@ type OffscreenApi = {
   }): Promise<void>;
   closeDocument(): Promise<void>;
 };
-type RuntimeWithContexts = typeof chrome.runtime & {
-  getContexts?: (filter: {
-    contextTypes: string[];
-    documentUrls?: string[];
-  }) => Promise<OffscreenContext[]>;
-};
 
 const offscreenApi = (chrome as unknown as { offscreen?: OffscreenApi }).offscreen;
-const runtimeWithContexts = chrome.runtime as RuntimeWithContexts;
-const offscreenUrl = chrome.runtime.getURL("offscreen.html");
 let offscreenReady = false;
+let resolveOffscreenReady: (() => void) | null = null;
 const pendingPrepares = new Map<
   string,
   { resolve: (value: unknown) => void; reject: (error: unknown) => void }
 >();
 
-/** Cria o documento offscreen somente quando o usuário inicia um download. */
+/**
+ * Cria o documento offscreen somente quando o usuário inicia um download.
+ * Aguarda o handshake `streams.ready` para nunca mandar mensagem antes de
+ * o listener do offscreen estar registrado.
+ */
 async function ensureOffscreen(): Promise<void> {
   if (offscreenReady) return;
   if (!offscreenApi) throw new Error("A API offscreen não está disponível.");
 
-  const contexts = runtimeWithContexts.getContexts
-    ? await runtimeWithContexts.getContexts({
-        contextTypes: ["OFFSCREEN_DOCUMENT"],
-        documentUrls: [offscreenUrl],
-      })
-    : [];
+  const ready = new Promise<void>((resolve) => {
+    resolveOffscreenReady = resolve;
+  });
 
-  if (!contexts.some((context) => context.documentUrl === offscreenUrl)) {
-    await offscreenApi.createDocument({
-      url: "offscreen.html",
-      reasons: ["WORKERS"],
-      justification: "Converter streams somente durante um download iniciado pelo usuário.",
-    });
-  }
+  // Fecha qualquer documento antigo e cria um novo para o handshake ser confiável.
+  await offscreenApi.closeDocument().catch(() => {});
+  await offscreenApi.createDocument({
+    url: "offscreen.html",
+    reasons: ["WORKERS"],
+    justification: "Converter streams somente durante um download iniciado pelo usuário.",
+  });
+
+  await withTimeout(ready, 8_000, "O conversor offscreen não iniciou.");
   offscreenReady = true;
+  resolveOffscreenReady = null;
 }
 
 async function closeOffscreen(): Promise<void> {
@@ -89,8 +87,8 @@ async function forwardStreamPrepare(request: StreamPrepareRequest): Promise<unkn
     });
     return await withTimeout(result, 10 * 60 * 1000, "Tempo limite da conversão offscreen.");
   } finally {
+    // Mantém o offscreen vivo para as próximas entradas do mesmo download.
     pendingPrepares.delete(request.requestId);
-    await closeOffscreen();
   }
 }
 
@@ -127,6 +125,18 @@ async function withTimeout<T>(
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  const ready = offscreenReadyMessageSchema.safeParse(message);
+  if (ready.success) {
+    resolveOffscreenReady?.();
+    return false;
+  }
+
+  const close = offscreenCloseMessageSchema.safeParse(message);
+  if (close.success) {
+    void closeOffscreen();
+    return false;
+  }
+
   const result = streamPrepareResultMessageSchema.safeParse(message);
   if (result.success) {
     pendingPrepares.get(result.data.requestId)?.resolve(result.data);

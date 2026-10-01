@@ -64,7 +64,7 @@ import {
 import { type ComponentType, useCallback, useId, useMemo, useRef, useState } from "react";
 import { useCollectedMedia, useCurrentTabId, useMediaPrefs } from "./hooks";
 import { clearStoredMedia } from "./lib/chrome";
-import { prepareStreamFile } from "./lib/offscreen";
+import { closeOffscreenDocument, prepareStreamFile } from "./lib/offscreen";
 
 const KIND_ICONS: Record<MediaKind, ComponentType<{ className?: string }>> = {
   video: Video,
@@ -232,6 +232,7 @@ export function App() {
         toast.error("Falha no download", { description: toErrorMessage(cause) });
       }
     } finally {
+      closeOffscreenDocument();
       await Promise.all([...preparedNames].map((name) => deleteOpfsFile(name).catch(() => {})));
       abortRef.current = null;
       setBusy(false);

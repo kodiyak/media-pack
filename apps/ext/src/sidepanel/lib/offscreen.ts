@@ -70,3 +70,11 @@ export async function prepareStreamFile(
 function abortError(): DOMException {
   return new DOMException("Operação cancelada.", "AbortError");
 }
+
+/** Fecha o documento offscreen ao final do download (sem erro se já estiver fechado). */
+export function closeOffscreenDocument(): void {
+  if (!hasExtensionApi()) return;
+  chrome.runtime.sendMessage({ type: "streams.close" }, () => {
+    void chrome.runtime.lastError;
+  });
+}
