@@ -8,7 +8,7 @@ tudo em *streaming*, sem estourar a RAM.
 | ----------------- | --------------------- | ------------------------------------------------------------------------- |
 | `@repo/protocol`  | `packages/protocol`   | Schemas e tipagens compartilhadas (**Zod**, reexportado)                   |
 | `@repo/media`     | `packages/media`      | Identificação de mídia: content-type/extensão → tipo, nome de arquivo, auto-seleção (puro/testável) |
-| `@repo/streams`   | `packages/streams`    | Resolução de manifestos **HLS/DASH** (m3u8-parser/fast-xml-parser) e metadados de stream |
+| `@repo/streams`   | `packages/streams`    | Resolução de manifestos **HLS/DASH** (S1) e conversão para **MP4** em streaming |
 | `@repo/downloader`| `packages/downloader` | Download em streaming + ZIP (`client-zip`) gravando direto no disco        |
 | `@repo/ui`        | `packages/ui`         | Componentes **shadcn/ui** (Tailwind v4, exportados em source)              |
 | `@apps/ext`       | `apps/ext`            | Extensão Chrome (MV3, **Side Panel**) com Vite + React + CRXJS             |
@@ -50,11 +50,11 @@ pnpm install
 4. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
    os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
 5. Ao clicar em **Baixar**, download + montagem do ZIP + conversão acontecem **juntos, em streaming**
-   (um arquivo por vez, gravando direto no disco). **HLS** é convertido para **MP4** na hora (fMP4
-   concatenado / TS → `mux.js` / AES-128 via WebCrypto) e entra no ZIP; **DASH** e streams não
-   suportados (live/SAMPLE-AES) caem no download direto. A UI mostra **duas barras**: **"Download"**
-   (arquivo atual, com progresso por segmento) e **"ZIP"** (arquivos ÷ total). Ao terminar, o progresso
-   é **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para
+   (um arquivo por vez, gravando direto no disco). **HLS** vira **MP4** (fMP4 concatenado / TS →
+   `mux.js` / AES-128 via WebCrypto); **DASH** vira **MP4 (vídeo) + `.m4a` (áudio)**; streams não
+   suportados (live/DRM) caem no download direto. A UI mostra **duas barras**: **"Download"** (arquivo
+   atual, com progresso por segmento) e **"ZIP"** (arquivos ÷ total). Ao terminar, o progresso é
+   **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para
    mídia, que já é comprimida.
 
 ## Catalog do pnpm
@@ -90,19 +90,22 @@ Lógica pura (sem `chrome.*`), por isso 100% testável:
 
 ## `@repo/streams`
 
-Resolução de manifestos (**S1**) e conversão **HLS → MP4** em streaming (**Fase B**):
+Resolução de manifestos (**S1**) e conversão **HLS/DASH → MP4** em streaming (**Fases B e C**):
 
-- `resolveStreamInfo({ url, streamType }, { fetch? })` → `Partial<StreamInfo>` (variantes, duração,
-  container, criptografia, tamanho estimado).
-- `parseHlsManifest` / `parseDashManifest` → metadados.
-- `buildHlsPlan(text, baseUrl)` → plano de segmentos (URLs resolvidas, byte ranges, chave AES-128, init).
-- `openHlsStream({ url, policy, signal, onProgress }, { fetch?, createTransmuxer? })` → `{ body }`:
-  - **fMP4** (`EXT-X-MAP`) → concatena `init` + segmentos;
-  - **TS** → transmuxa com **mux.js** (`import()` dinâmico, code-split);
-  - **AES-128** → descriptografa cada segmento com WebCrypto.
-- `hlsOutputFilename(item)` → nome `.mp4`.
-- Limitações da fase: **VOD** apenas (live e SAMPLE-AES caem no download direto); **DASH** ainda é
-  baixado como `.mpd` (Fase C).
+- `resolveStreamInfo(...)` → `Partial<StreamInfo>` (variantes, duração, container, criptografia,
+  tamanho estimado); `parseHlsManifest` / `parseDashManifest` → metadados.
+- **HLS**: `buildHlsPlan` (URLs, byte ranges `EXT-X-BYTERANGE`, AES-128, init `EXT-X-MAP`) +
+  `openHlsStream({ url, policy, signal, onProgress })`:
+  - fMP4 (`EXT-X-MAP`) → concatena `init` + segmentos;
+  - TS → transmuxa com **mux.js** (`import()` dinâmico, code-split);
+  - AES-128 → descriptografa com WebCrypto.
+- **DASH**: `buildDashPlan` (SegmentTemplate `$Number$`/`$Time$`/SegmentTimeline, SegmentList,
+  SegmentBase) + `resolveDashTracks(...)` / `openDashTrack(...)` → MP4 do **vídeo** e `.m4a` do **áudio**
+  (faixas separadas).
+- `mp4/track.ts` concentra o streaming (concat fMP4 / transmux TS / arquivo único).
+- Nomes: `hlsOutputFilename(item)`, `streamBaseName(item)`.
+- Limitações: **VOD** apenas (live cai no download direto); **DRM** (SAMPLE-AES / `ContentProtection`)
+  não é suportado; áudio DASH sai como arquivo separado (sem mux A/V).
 
 ## `@repo/downloader`
 
