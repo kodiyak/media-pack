@@ -1,5 +1,14 @@
 import { type ClassifyInput, classifyResponse, parseContentRangeTotal } from "@repo/media";
-import { type ClassifiedMedia, type MediaItem, mediaItemSchema, z } from "@repo/protocol";
+import {
+  type ClassifiedMedia,
+  type MediaItem,
+  mediaItemSchema,
+  type StreamCancelRequest,
+  type StreamPrepareRequest,
+  streamCancelRequestSchema,
+  streamPrepareRequestSchema,
+  z,
+} from "@repo/protocol";
 import { resolveStreamInfo } from "@repo/streams";
 
 const MEDIA_KEY = "media";
@@ -8,6 +17,101 @@ const MAX_ITEMS = 2000;
 const mediaListSchema = z.array(mediaItemSchema);
 
 type TabInfo = { url?: string; title?: string };
+
+type OffscreenContext = { contextType?: string; documentUrl?: string };
+type OffscreenApi = {
+  createDocument(options: {
+    url: string;
+    reasons: ["WORKERS"];
+    justification: string;
+  }): Promise<void>;
+  closeDocument(): Promise<void>;
+};
+type RuntimeWithContexts = typeof chrome.runtime & {
+  getContexts?: (filter: {
+    contextTypes: string[];
+    documentUrls?: string[];
+  }) => Promise<OffscreenContext[]>;
+};
+
+const offscreenApi = (chrome as unknown as { offscreen?: OffscreenApi }).offscreen;
+const runtimeWithContexts = chrome.runtime as RuntimeWithContexts;
+const offscreenUrl = chrome.runtime.getURL("offscreen.html");
+let offscreenReady = false;
+
+/** Cria o documento offscreen somente quando o usuário inicia um download. */
+async function ensureOffscreen(): Promise<void> {
+  if (offscreenReady) return;
+  if (!offscreenApi) throw new Error("A API offscreen não está disponível.");
+
+  const contexts = runtimeWithContexts.getContexts
+    ? await runtimeWithContexts.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [offscreenUrl],
+      })
+    : [];
+
+  if (!contexts.some((context) => context.documentUrl === offscreenUrl)) {
+    await offscreenApi.createDocument({
+      url: "offscreen.html",
+      reasons: ["WORKERS"],
+      justification: "Converter streams somente durante um download iniciado pelo usuário.",
+    });
+  }
+  offscreenReady = true;
+}
+
+async function closeOffscreen(): Promise<void> {
+  if (!offscreenReady || !offscreenApi) return;
+  offscreenReady = false;
+  await offscreenApi.closeDocument().catch(() => {});
+}
+
+async function forwardStreamPrepare(request: StreamPrepareRequest): Promise<unknown> {
+  await ensureOffscreen();
+  try {
+    return await chrome.runtime.sendMessage({
+      ...request,
+      type: "streams.prepare.offscreen",
+    });
+  } finally {
+    await closeOffscreen();
+  }
+}
+
+async function forwardStreamCancel(request: StreamCancelRequest): Promise<unknown> {
+  if (!offscreenReady) return { ok: true };
+  return chrome.runtime.sendMessage({
+    ...request,
+    type: "streams.cancel.offscreen",
+  });
+}
+
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  const prepare = streamPrepareRequestSchema.safeParse(message);
+  if (prepare.success) {
+    void forwardStreamPrepare(prepare.data)
+      .then(sendResponse)
+      .catch((error: unknown) =>
+        sendResponse({
+          requestId: prepare.data.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    return true;
+  }
+
+  const cancel = streamCancelRequestSchema.safeParse(message);
+  if (cancel.success) {
+    void forwardStreamCancel(cancel.data)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  return false;
+});
 
 /** Cache de URL/título por aba, usado para enriquecer o item capturado. */
 const tabInfo = new Map<number, TabInfo>();

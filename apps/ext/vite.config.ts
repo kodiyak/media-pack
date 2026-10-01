@@ -24,5 +24,10 @@ export default defineConfig({
     target: "esnext",
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        offscreen: fileURLToPath(new URL("./offscreen.html", import.meta.url)),
+      },
+    },
   },
 });

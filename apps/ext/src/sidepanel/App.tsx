@@ -3,6 +3,8 @@ import {
   canUseFileSystemAccess,
   createZipStream,
   type DownloadSource,
+  deleteOpfsFile,
+  opfsSource,
   prepareZipSink,
   toErrorMessage,
   urlSource,
@@ -21,13 +23,12 @@ import {
   shouldAutoSelect,
   variantLabel,
 } from "@repo/media";
-import type { MediaItem, MediaKind, StreamVariantPolicy } from "@repo/protocol";
+import type { MediaItem, MediaKind, PreparedTrackPlan, StreamVariantPolicy } from "@repo/protocol";
 import {
   hlsOutputFilename,
-  openDashTrack,
-  openHlsStream,
   resolveDashTracks,
   streamBaseName,
+  type TrackPlan,
 } from "@repo/streams";
 import {
   Badge,
@@ -63,6 +64,7 @@ import {
 import { type ComponentType, useCallback, useId, useMemo, useRef, useState } from "react";
 import { useCollectedMedia, useCurrentTabId, useMediaPrefs } from "./hooks";
 import { clearStoredMedia } from "./lib/chrome";
+import { prepareStreamFile } from "./lib/offscreen";
 
 const KIND_ICONS: Record<MediaKind, ComponentType<{ className?: string }>> = {
   video: Video,
@@ -196,13 +198,20 @@ export function App() {
 
     type Sink = Awaited<ReturnType<typeof prepareZipSink>>;
     let sink: Sink | null = null;
+    const preparedNames = new Set<string>();
 
     try {
       // O seletor de arquivo precisa acontecer dentro do gesto do usuário.
       sink = await prepareZipSink(buildZipName());
 
-      // Resolve as fontes (DASH precisa do manifesto antes de escrever o ZIP).
-      const sources = await buildSources(selected, prefs.streamVariantPolicy, controller.signal);
+      // Resolve apenas metadados/planos depois do clique; os segmentos só são processados
+      // quando a entrada correspondente do ZIP for aberta.
+      const sources = await buildSources(
+        selected,
+        prefs.streamVariantPolicy,
+        controller.signal,
+        (name) => preparedNames.add(name),
+      );
       setZipJob({ label: "Baixando…", detail: `0/${sources.length}`, percent: 0 });
 
       await sink.write(createZipStream(sources, { signal: controller.signal, onProgress }));
@@ -223,6 +232,7 @@ export function App() {
         toast.error("Falha no download", { description: toErrorMessage(cause) });
       }
     } finally {
+      await Promise.all([...preparedNames].map((name) => deleteOpfsFile(name).catch(() => {})));
       abortRef.current = null;
       setBusy(false);
     }
@@ -455,26 +465,36 @@ function ProgressRow({ label, job }: { label: string; job: ProgressState | null 
   );
 }
 
-/** Monta as fontes do ZIP: HLS converte na hora, DASH vira vídeo + áudio. */
+/**
+ * Monta as fontes do ZIP sem converter nada antecipadamente.
+ * Cada stream só cria um arquivo temporário no OPFS quando o ZIP abrir sua entrada.
+ */
 async function buildSources(
   items: MediaItem[],
   policy: StreamVariantPolicy,
   signal: AbortSignal,
+  onPrepared: (name: string) => void,
 ): Promise<DownloadSource[]> {
   const sources: DownloadSource[] = [];
 
   for (const item of items) {
     if (isConvertibleHls(item)) {
-      sources.push({
-        filename: hlsOutputFilename(item),
-        open: (openSignal, onProgress) =>
-          openHlsStream({ url: item.url, policy, signal: openSignal, onProgress }),
-      });
+      sources.push(
+        lazyPreparedSource(
+          {
+            url: item.url,
+            streamType: "hls",
+            policy,
+            filename: hlsOutputFilename(item),
+          },
+          onPrepared,
+        ),
+      );
       continue;
     }
 
     if (item.streamType === "dash") {
-      sources.push(...(await buildDashSources(item, policy, signal)));
+      sources.push(...(await buildDashSources(item, policy, signal, onPrepared)));
       continue;
     }
 
@@ -488,16 +508,27 @@ async function buildDashSources(
   item: MediaItem,
   policy: StreamVariantPolicy,
   signal: AbortSignal,
+  onPrepared: (name: string) => void,
 ): Promise<DownloadSource[]> {
   const base = streamBaseName(item);
 
   try {
+    // Isto baixa somente o MPD para descobrir se haverá vídeo e áudio. Os segmentos
+    // ficam adiados até o client-zip abrir cada uma das entradas.
     const { tracks } = await resolveDashTracks({ url: item.url, policy, signal });
-    return tracks.map((track) => ({
-      filename: track.kind === "video" ? `${base}.mp4` : `${base}.audio.m4a`,
-      open: (openSignal, onProgress) =>
-        openDashTrack(track.plan, { signal: openSignal, onProgress }),
-    }));
+    return tracks.map((track) => {
+      const filename = track.kind === "video" ? `${base}.mp4` : `${base}.audio.m4a`;
+      return lazyPreparedSource(
+        {
+          url: item.url,
+          streamType: "dash",
+          policy,
+          filename,
+          track: toPreparedTrackPlan(track.plan),
+        },
+        onPrepared,
+      );
+    });
   } catch (error) {
     const message = toErrorMessage(error);
     return [
@@ -509,6 +540,42 @@ async function buildDashSources(
       },
     ];
   }
+}
+
+function lazyPreparedSource(
+  input: {
+    url: string;
+    streamType: "hls" | "dash";
+    policy: StreamVariantPolicy;
+    filename: string;
+    track?: PreparedTrackPlan;
+  },
+  onPrepared: (name: string) => void,
+): DownloadSource {
+  return {
+    filename: input.filename,
+    async open(signal, onProgress) {
+      const activeSignal = signal ?? new AbortController().signal;
+      const prepared = await prepareStreamFile(input, activeSignal, onProgress);
+      onPrepared(prepared.name);
+
+      try {
+        return await opfsSource(prepared.name, input.filename).open(activeSignal, onProgress);
+      } catch (error) {
+        await deleteOpfsFile(prepared.name).catch(() => {});
+        throw error;
+      }
+    },
+  };
+}
+
+function toPreparedTrackPlan(track: TrackPlan): PreparedTrackPlan {
+  return {
+    container: track.container,
+    initUrl: track.initUrl,
+    singleUrl: track.singleUrl,
+    segments: track.segments.map(({ url, byteRange }) => ({ url, byteRange })),
+  };
 }
 
 /** Só converte HLS VOD sem DRM; o resto cai no download direto. */

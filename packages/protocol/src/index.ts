@@ -2,5 +2,6 @@
 
 // schemas / tipos da aplicação
 export * from "./schemas/media";
+export * from "./schemas/messages";
 export * from "./schemas/prefs";
 export * from "./zod";

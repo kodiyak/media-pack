@@ -9,7 +9,7 @@ tudo em *streaming*, sem estourar a RAM.
 | `@repo/protocol`  | `packages/protocol`   | Schemas e tipagens compartilhadas (**Zod**, reexportado)                   |
 | `@repo/media`     | `packages/media`      | Identificação de mídia: content-type/extensão → tipo, nome de arquivo, auto-seleção (puro/testável) |
 | `@repo/streams`   | `packages/streams`    | Resolução de manifestos **HLS/DASH** (S1) e conversão para **MP4** em streaming |
-| `@repo/downloader`| `packages/downloader` | Download em streaming + ZIP (`client-zip`) gravando direto no disco        |
+| `@repo/downloader`| `packages/downloader` | Download/ZIP em streaming + staging temporário OPFS com limpeza            |
 | `@repo/ui`        | `packages/ui`         | Componentes **shadcn/ui** (Tailwind v4, exportados em source)              |
 | `@apps/ext`       | `apps/ext`            | Extensão Chrome (MV3, **Side Panel**) com Vite + React + CRXJS             |
 
@@ -44,18 +44,21 @@ pnpm install
    `streamType` (HLS/DASH).
 2. `@repo/media` classifica cada resposta (tipo, nome de arquivo a partir do
    `Content-Disposition`/URL, tamanho) e o item é gravado em `chrome.storage.session`.
-3. **S1 (eager-manifest)**: para cada manifesto, `@repo/streams` baixa o `.m3u8`/`.mpd` (alguns KB) e
-   enriquece o item com **variantes, duração, container (TS/fMP4), criptografia e tamanho estimado**.
-   A qualidade escolhida segue a preferência **“Qualidade do stream”** (padrão: melhor).
+3. **S1 (eager-manifest)**: para cada manifesto, `@repo/streams` baixa somente o `.m3u8`/`.mpd`
+   (alguns KB) e enriquece o item com **variantes, duração, container (TS/fMP4), criptografia e
+   tamanho estimado**. Antes do clique em **Baixar**, não há download de segmentos, transmux,
+   conversão nem criação de arquivos no OPFS. A qualidade escolhida segue a preferência
+   **“Qualidade do stream”** (padrão: melhor).
 4. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
    os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
-5. Ao clicar em **Baixar**, download + montagem do ZIP + conversão acontecem **juntos, em streaming**
-   (um arquivo por vez, gravando direto no disco). **HLS** vira **MP4** (fMP4 concatenado / TS →
-   `mux.js` / AES-128 via WebCrypto); **DASH** vira **MP4 (vídeo) + `.m4a` (áudio)**; streams não
-   suportados (live/DRM) caem no download direto. A UI mostra **duas barras**: **"Download"** (arquivo
-   atual, com progresso por segmento) e **"ZIP"** (arquivos ÷ total). Ao terminar, o progresso é
-   **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para
-   mídia, que já é comprimida.
+5. Ao clicar em **Baixar**, o service worker cria o documento **offscreen** somente nesse momento.
+   O `client-zip` abre uma entrada por vez: a conversão daquela entrada roda em background, grava um
+   arquivo temporário no **OPFS**, e o ZIP lê esse arquivo em streaming. **HLS** vira **MP4** (fMP4
+   concatenado / TS → `mux.js` / AES-128 via WebCrypto); **DASH** vira **MP4 (vídeo) + `.m4a`
+   (áudio)**; streams não suportados (live/DRM) geram erro por entrada sem converter nada antes.
+   A UI mostra **duas barras**: **"Download"** (arquivo atual) e **"ZIP"** (arquivos ÷ total). Ao
+   terminar, o progresso é **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem
+   compressão) — ideal para mídia, que já é comprimida.
 
 ## Catalog do pnpm
 
@@ -120,7 +123,23 @@ dois progressos por evento:
 Outros:
 
 - `prepareZipSink(name)` → `ZipSink` (grava com a File System Access API; fallback blob).
+- `opfsSource(name, filename)` → fonte temporária que remove o arquivo OPFS depois da leitura.
+- `cleanupOpfs()` aplica a política de retenção: **30 minutos**, **1 GiB** ou **12 arquivos**;
+  arquivos protegidos durante um job nunca são removidos.
 - `buildZipName()` → `media-pack-<timestamp>.zip`.
+
+## Fase D — conversão lazy, offscreen e limpeza do OPFS
+
+- O documento offscreen (`WORKERS`) não existe permanentemente: é criado pelo service worker somente
+  para a conversão solicitada pelo download e fechado ao terminar cada entrada.
+- O planejamento DASH para descobrir vídeo/áudio acontece depois do clique, mas ainda não baixa
+  segmentos. HLS também só abre o manifesto e segmentos quando o ZIP pede a entrada.
+- O OPFS usa o diretório privado `media-pack-cache`. Cada arquivo temporário é removido após ser
+  lido pelo ZIP e novamente no `finally` do painel.
+- Há uma limpeza oportunística no início de cada job: arquivos com mais de **30 min**, acima de
+  **1 GiB** acumulado ou além de **12 arquivos** são removidos, do mais antigo para o mais novo.
+  Se o navegador/extensão morrer, o próximo download recupera esse lixo automaticamente.
+- A política é testável sem navegador via `selectOpfsEntriesForDeletion(...)` em `@repo/downloader`.
 
 ## `@repo/ui` (shadcn)
 
@@ -141,7 +160,9 @@ Os componentes usam a convenção atual do shadcn: `cn` (de `cn`) e `radix-ui`.
 ## Extensão (`@apps/ext`)
 
 - `manifest.config.ts` declara o manifest MV3 com o **Side Panel** (`side_panel.default_path`),
-  o service worker e as permissões `storage`, `webRequest` e `sidePanel`.
+  o service worker e as permissões `storage`, `webRequest`, `sidePanel` e `offscreen`.
+- `offscreen.html` é uma entrada adicional do build; ele só é criado/aberto dinamicamente pelo
+  service worker durante uma conversão iniciada pelo usuário.
 - `/src/background` → service worker (monitora a rede e grava em `chrome.storage.session`).
 - `/src/sidepanel` → React do painel (lista, seleção e download em ZIP).
 - Clique no ícone da extensão abre o side panel
