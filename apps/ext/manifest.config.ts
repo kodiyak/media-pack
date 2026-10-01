@@ -4,7 +4,8 @@ export default defineManifest({
   manifest_version: 3,
   name: "Media Pack",
   version: "0.0.0",
-  description: "Colete mídias de qualquer página e organize em packs.",
+  description: "Identifica mídias enquanto as páginas carregam e baixa tudo em um ZIP.",
+  minimum_chrome_version: "116",
   icons: {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -21,13 +22,6 @@ export default defineManifest({
     service_worker: "src/background/index.ts",
     type: "module",
   },
-  content_scripts: [
-    {
-      matches: ["http://*/*", "https://*/*"],
-      js: ["src/content/index.ts"],
-      run_at: "document_idle",
-    },
-  ],
-  permissions: ["storage", "activeTab", "scripting", "sidePanel"],
+  permissions: ["storage", "webRequest", "sidePanel"],
   host_permissions: ["http://*/*", "https://*/*"],
 });

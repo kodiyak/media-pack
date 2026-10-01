@@ -48,6 +48,9 @@ catalogs:
     class-variance-authority:
       specifier: 0.7.1
       version: 0.7.1
+    client-zip:
+      specifier: 2.5.1
+      version: 2.5.1
     cn:
       specifier: 0.4.0
       version: 0.4.0
@@ -119,6 +122,12 @@ importers:
 
   apps/ext:
     dependencies:
+      '@repo/downloader':
+        specifier: workspace:*
+        version: link:../../packages/downloader
+      '@repo/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@repo/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -196,6 +205,50 @@ importers:
         specifier: 'catalog:'
         version: 0.0.4(playwright@1.63.0)(vitest@5.0.3)
 
+  packages/downloader:
+    dependencies:
+      client-zip:
+        specifier: 'catalog:'
+        version: 2.5.1
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.3
+      '@vitest/coverage-v8':
+        specifier: 'catalog:'
+        version: 5.0.3(vitest@5.0.3)
+      rimraf:
+        specifier: 'catalog:'
+        version: 6.1.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.3(@types/node@26.6.3)(@vitest/coverage-v8@5.0.3)(jsdom@30.1.1)(vite@8.3.2(@types/node@26.6.3)(jiti@2.7.0))
+
+  packages/media:
+    dependencies:
+      '@repo/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.3
+      '@vitest/coverage-v8':
+        specifier: 'catalog:'
+        version: 5.0.3(vitest@5.0.3)
+      rimraf:
+        specifier: 'catalog:'
+        version: 6.1.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.3(@types/node@26.6.3)(@vitest/coverage-v8@5.0.3)(jsdom@30.1.1)(vite@8.3.2(@types/node@26.6.3)(jiti@2.7.0))
+
   packages/protocol:
     dependencies:
       zod:
@@ -226,6 +279,9 @@ importers:
       cn:
         specifier: 'catalog:'
         version: 0.4.0
+      lucide-react:
+        specifier: 'catalog:'
+        version: 1.49.0(@types/react@19.3.0)(react@19.3.0)
       radix-ui:
         specifier: 'catalog:'
         version: 1.6.7(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -1894,6 +1950,9 @@ packages:
   cli-spinners@2.9.2:
     resolution: {integrity: sha512-ywqV+5MmyL4E7ybXgKys4DugZbX0FC6LnwrhjuykIjnK9k8OQacQ7axGKnjDXWNhns0xot3bZI5h55H8yo9cJg==}
     engines: {node: '>=6'}
+
+  client-zip@2.5.1:
+    resolution: {integrity: sha512-yOvNSBsQX1B7wtdvIVXJEIIShrlPiX+adhli7sWvQhsx3nX1DjvpSt+AwOxaX+3DCsT/Yx0nRy5hIjRLIYfebw==}
 
   clsx@2.1.1:
     resolution: {integrity: sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA==}
@@ -5110,6 +5169,8 @@ snapshots:
       restore-cursor: 5.1.0
 
   cli-spinners@2.9.2: {}
+
+  client-zip@2.5.1: {}
 
   clsx@2.1.1: {}
 

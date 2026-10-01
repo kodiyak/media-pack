@@ -17,6 +17,8 @@
     "clean": "rimraf .turbo dist node_modules"
   },
   "dependencies": {
+    "@repo/downloader": "workspace:*",
+    "@repo/media": "workspace:*",
     "@repo/protocol": "workspace:*",
     "@repo/ui": "workspace:*",
     "lucide-react": "catalog:",
