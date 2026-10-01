@@ -2,12 +2,18 @@ import type { MediaKind, StreamType } from "@repo/protocol";
 
 /** Rótulos em pt-BR usados na UI. */
 export const KIND_LABELS: Record<MediaKind, string> = {
-  image: "Imagem",
   video: "Vídeo",
   audio: "Áudio",
+  image: "Imagem",
   document: "Documento",
   archive: "Arquivo",
   other: "Outro",
+};
+
+/** Rótulos em pt-BR para os tipos de manifesto. */
+export const STREAM_LABELS: Record<StreamType, string> = {
+  hls: "HLS",
+  dash: "DASH",
 };
 
 /** Ordem exibida nos filtros. */

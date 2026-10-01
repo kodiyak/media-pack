@@ -4,18 +4,23 @@ import {
   createZipStream,
   prepareZipSink,
   toErrorMessage,
+  urlSource,
   type ZipProgressEvent,
 } from "@repo/downloader";
 import {
   formatBytes,
+  formatDuration,
   KIND_LABELS,
   MEDIA_KINDS,
   matchesKind,
   matchesQuery,
   matchesTab,
+  STREAM_LABELS,
+  selectVariant,
   shouldAutoSelect,
+  variantLabel,
 } from "@repo/media";
-import type { MediaItem, MediaKind } from "@repo/protocol";
+import type { MediaItem, MediaKind, StreamVariantPolicy } from "@repo/protocol";
 import {
   Badge,
   Button,
@@ -65,6 +70,12 @@ const SIZE_OPTIONS: { label: string; value: number }[] = [
   { label: "Mais de 100 KB", value: 100 * 1024 },
   { label: "Mais de 1 MB", value: 1024 * 1024 },
   { label: "Mais de 10 MB", value: 10 * 1024 * 1024 },
+];
+
+const STREAM_QUALITY_OPTIONS: { label: string; value: StreamVariantPolicy }[] = [
+  { label: "Melhor qualidade", value: "best" },
+  { label: "Equilibrada (720p)", value: "balanced" },
+  { label: "Menor", value: "smallest" },
 ];
 
 type ProgressState = {
@@ -145,17 +156,16 @@ export function App() {
   const handleDownload = useCallback(async () => {
     if (busy || selected.length === 0) return;
 
-    const files = selected.map((item) => ({
-      url: item.url,
-      filename: item.filename ?? `media-${item.id}`,
-    }));
+    const sources = selected.map((item) =>
+      urlSource(item.url, item.filename ?? `media-${item.id}`),
+    );
 
     const controller = new AbortController();
     abortRef.current = controller;
     setBusy(true);
     setError(null);
     setDownloadJob({ label: "Preparando…", detail: "", percent: 0 });
-    setZipJob({ label: "Baixando vídeos…", detail: `0/${files.length}`, percent: 0 });
+    setZipJob({ label: "Baixando vídeos…", detail: `0/${sources.length}`, percent: 0 });
 
     const onProgress = (event: ZipProgressEvent) => {
       if (event.phase === "error") {
@@ -186,7 +196,7 @@ export function App() {
       // O seletor de arquivo precisa acontecer dentro do gesto do usuário.
       sink = await prepareZipSink(buildZipName());
 
-      await sink.write(createZipStream(files, { signal: controller.signal, onProgress }));
+      await sink.write(createZipStream(sources, { signal: controller.signal, onProgress }));
 
       toast.success("ZIP salvo", { description: sink.name });
 
@@ -271,6 +281,27 @@ export function App() {
             </div>
 
             <div className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Qualidade do stream</span>
+              <Select
+                value={prefs.streamVariantPolicy}
+                onValueChange={(value) =>
+                  updatePrefs({ streamVariantPolicy: value as StreamVariantPolicy })
+                }
+              >
+                <SelectTrigger className="w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STREAM_QUALITY_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
               <span className="text-sm font-medium">Aba</span>
               <div className="flex gap-1.5">
                 <Button
@@ -346,9 +377,7 @@ export function App() {
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{item.filename ?? item.url}</p>
                       <p className="truncate text-xs text-muted-foreground">
-                        {item.mimeType ?? KIND_LABELS[item.kind]}
-                        {item.streamType ? ` · ${item.streamType.toUpperCase()}` : ""} ·{" "}
-                        {formatBytes(item.sizeInBytes)}
+                        {describeItem(item, prefs.streamVariantPolicy)}
                       </p>
                     </div>
                     <Badge variant="secondary">{KIND_LABELS[item.kind]}</Badge>
@@ -415,4 +444,32 @@ function ProgressRow({ label, job }: { label: string; job: ProgressState | null 
       </span>
     </div>
   );
+}
+
+/** Linha de metadados do item (streams mostram qualidade/duração/tamanho). */
+function describeItem(item: MediaItem, policy: StreamVariantPolicy): string {
+  if (item.streamType) {
+    const { stream } = item;
+    if (!stream) return `${STREAM_LABELS[item.streamType]} · resolvendo…`;
+
+    const parts = [STREAM_LABELS[item.streamType]];
+    const variant = selectVariant(stream.variants ?? [], policy);
+    if (variant) parts.push(variantLabel(variant));
+
+    const duration = formatDuration(stream.durationSeconds ?? item.durationInSeconds);
+    if (duration) parts.push(duration);
+
+    const bytes = stream.estimatedBytes ?? item.sizeInBytes;
+    if (bytes !== undefined) parts.push(`~${formatBytes(bytes)}`);
+
+    if (stream.container) parts.push(stream.container.toUpperCase());
+    if (stream.encryption && stream.encryption !== "none") {
+      parts.push(stream.encryption.toUpperCase());
+    }
+    if (stream.live) parts.push("Ao vivo");
+
+    return parts.join(" · ");
+  }
+
+  return `${item.mimeType ?? KIND_LABELS[item.kind]} · ${formatBytes(item.sizeInBytes)}`;
 }

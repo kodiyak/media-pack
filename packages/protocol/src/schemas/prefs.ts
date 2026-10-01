@@ -1,5 +1,5 @@
 import { z } from "../zod";
-import { mediaKindSchema } from "./media";
+import { mediaKindSchema, streamVariantPolicySchema } from "./media";
 
 /** Preferências usadas pelo painel para decidir o que auto-selecionar. */
 export const mediaPrefsSchema = z.object({
@@ -11,6 +11,8 @@ export const mediaPrefsSchema = z.object({
   onlyCurrentTab: z.boolean().default(true),
   /** Inclui manifestos HLS/DASH na auto-seleção. */
   includeStreams: z.boolean().default(true),
+  /** Qualidade preferida ao resolver manifestos HLS/DASH. */
+  streamVariantPolicy: streamVariantPolicySchema.default("best"),
 });
 export type MediaPrefs = z.infer<typeof mediaPrefsSchema>;
 export type MediaPrefsInput = z.input<typeof mediaPrefsSchema>;

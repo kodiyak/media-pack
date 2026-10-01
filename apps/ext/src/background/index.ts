@@ -1,5 +1,6 @@
 import { type ClassifyInput, classifyResponse, parseContentRangeTotal } from "@repo/media";
 import { type ClassifiedMedia, type MediaItem, mediaItemSchema, z } from "@repo/protocol";
+import { resolveStreamInfo } from "@repo/streams";
 
 const MEDIA_KEY = "media";
 const MAX_ITEMS = 2000;
@@ -79,34 +80,68 @@ chrome.webRequest.onHeadersReceived.addListener(
 // Serializa as escritas para não perder itens em requisições concorrentes.
 let writeQueue: Promise<void> = Promise.resolve();
 
-function saveMedia(classified: ClassifiedMedia): Promise<void> {
-  writeQueue = writeQueue
-    .then(() => persist(classified))
-    .catch((error: unknown) => {
-      console.error("[media-pack] falha ao salvar mídia", error);
-    });
+function enqueueWrite(task: () => Promise<void>): Promise<void> {
+  writeQueue = writeQueue.then(task).catch((error: unknown) => {
+    console.error("[media-pack] falha ao gravar mídia", error);
+  });
   return writeQueue;
 }
 
-async function persist(classified: ClassifiedMedia): Promise<void> {
+async function readList(): Promise<MediaItem[]> {
   const stored = await chrome.storage.session.get(MEDIA_KEY);
   const parsed = mediaListSchema.safeParse(stored[MEDIA_KEY]);
-  const current = parsed.success ? parsed.data : [];
+  return parsed.success ? parsed.data : [];
+}
 
-  if (current.some((item) => item.url === classified.url)) return;
+function saveMedia(classified: ClassifiedMedia): Promise<void> {
+  return enqueueWrite(async () => {
+    const current = await readList();
+    if (current.some((item) => item.url === classified.url)) return;
 
-  const candidate: MediaItem = {
-    ...classified,
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-  };
+    const candidate: MediaItem = {
+      ...classified,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    const item = mediaItemSchema.safeParse(candidate);
+    if (!item.success) return;
 
-  const item = mediaItemSchema.safeParse(candidate);
-  if (!item.success) return;
+    await chrome.storage.session.set({
+      [MEDIA_KEY]: [item.data, ...current].slice(0, MAX_ITEMS),
+    });
 
-  await chrome.storage.session.set({
-    [MEDIA_KEY]: [item.data, ...current].slice(0, MAX_ITEMS),
+    // S1: manifestos são resolvidos em seguida (fora da fila de escrita).
+    if (item.data.streamType) void enrichStream(item.data);
   });
+}
+
+/** S1: resolve os metadados do manifesto e mescla no item já salvo. */
+async function enrichStream(item: MediaItem): Promise<void> {
+  if (!item.streamType) return;
+
+  try {
+    const info = await resolveStreamInfo({ url: item.url, streamType: item.streamType });
+
+    await enqueueWrite(async () => {
+      const current = await readList();
+      const index = current.findIndex((entry) => entry.url === item.url);
+      const existing = index >= 0 ? current[index] : undefined;
+      if (!existing) return;
+
+      const merged = mediaItemSchema.safeParse({
+        ...existing,
+        stream: { ...(existing.stream ?? {}), ...info },
+        durationInSeconds: info.durationSeconds ?? existing.durationInSeconds,
+        sizeInBytes: info.estimatedBytes ?? existing.sizeInBytes,
+      });
+      if (!merged.success) return;
+
+      current[index] = merged.data;
+      await chrome.storage.session.set({ [MEDIA_KEY]: current });
+    });
+  } catch (error) {
+    console.error("[media-pack] falha ao resolver manifesto", error);
+  }
 }
 
 chrome.sidePanel

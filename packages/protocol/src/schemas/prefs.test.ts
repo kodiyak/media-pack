@@ -9,6 +9,7 @@ describe("mediaPrefsSchema", () => {
     expect(prefs.minSizeInBytes).toBe(0);
     expect(prefs.onlyCurrentTab).toBe(true);
     expect(prefs.includeStreams).toBe(true);
+    expect(prefs.streamVariantPolicy).toBe("best");
   });
 
   it("DEFAULT_MEDIA_PREFS reflete o parse vazio", () => {

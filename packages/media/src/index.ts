@@ -3,3 +3,4 @@ export * from "./filename";
 export * from "./format";
 export * from "./kinds";
 export * from "./selection";
+export * from "./streams";

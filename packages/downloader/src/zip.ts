@@ -2,14 +2,23 @@ import { makeZip } from "client-zip";
 import { uniqueEntryName } from "./names";
 import { countBytes, parseContentLength, toErrorMessage } from "./stream";
 
-/** Um arquivo a ser baixado e empacotado. */
-export type DownloadFile = {
-  url: string;
+/** Conteúdo aberto de uma fonte: stream (ou bytes) + tamanho conhecido. */
+export type OpenedSource = {
+  body: ReadableStream<Uint8Array> | Uint8Array;
+  totalBytes?: number;
+};
+
+/**
+ * Uma entrada do ZIP, aberta sob demanda. Arquivos comuns usam `urlSource`;
+ * streams transmuxados (Fase B) retornam o MP4 gerado aqui.
+ */
+export type DownloadSource = {
   filename: string;
+  open(signal?: AbortSignal): Promise<OpenedSource>;
 };
 
 export type ZipProgressEvent = {
-  phase: "downloading" | "done" | "error";
+  phase: "converting" | "downloading" | "done" | "error";
   /** Índice (0-based) do arquivo atual. */
   index: number;
   total: number;
@@ -22,43 +31,68 @@ export type ZipProgressEvent = {
   filePercent: number;
   /** Progresso geral (arquivos baixados + fração do atual), de 0 a 100. */
   overallPercent: number;
+  /** Progresso interno da fonte, ex.: segmento `i` de `n` (streams). */
+  subIndex?: number;
+  subTotal?: number;
   error?: string;
 };
 
 export type ZipOptions = {
-  /** Injetável para testes; por padrão usa o `fetch` global. */
-  fetch?: typeof globalThis.fetch;
   onProgress?: (event: ZipProgressEvent) => void;
   signal?: AbortSignal;
 };
 
+/** Fonte padrão: baixa a URL direto (com cookies da sessão). */
+export function urlSource(
+  url: string,
+  filename: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch.bind(globalThis),
+): DownloadSource {
+  return {
+    filename,
+    async open(signal) {
+      const response = await fetchImpl(url, {
+        signal,
+        credentials: "include",
+        redirect: "follow",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+      }
+
+      const totalBytes = parseContentLength(response);
+      const body = response.body ?? new Uint8Array(await response.arrayBuffer());
+      return { body, totalBytes };
+    },
+  };
+}
+
 /**
- * Baixa os arquivos e monta o ZIP em streaming (um arquivo por vez, sem manter
- * o conteúdo na memória). Emite progresso do arquivo atual e geral.
+ * Baixa as fontes e monta o ZIP em streaming (uma por vez, sem manter o
+ * conteúdo na memória). Emite progresso do arquivo atual e geral.
  */
 export function createZipStream(
-  files: DownloadFile[],
+  sources: DownloadSource[],
   options: ZipOptions = {},
 ): ReadableStream<Uint8Array> {
-  return makeZip(entries(files, options)) as ReadableStream<Uint8Array>;
+  return makeZip(entries(sources, options)) as ReadableStream<Uint8Array>;
 }
 
 type ZipEntry = {
   name: string;
   input: ReadableStream<Uint8Array> | Uint8Array;
-  lastModified?: Date;
 };
 
-async function* entries(files: DownloadFile[], options: ZipOptions): AsyncGenerator<ZipEntry> {
-  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+async function* entries(sources: DownloadSource[], options: ZipOptions): AsyncGenerator<ZipEntry> {
   const used = new Set<string>();
-  const total = files.length;
+  const total = sources.length;
 
   for (let index = 0; index < total; index += 1) {
-    const file = files[index];
-    if (!file) continue;
+    const source = sources[index];
+    if (!source) continue;
 
-    const name = uniqueEntryName(used, file.filename);
+    const name = uniqueEntryName(used, source.filename);
     options.onProgress?.({
       phase: "downloading",
       index,
@@ -70,23 +104,16 @@ async function* entries(files: DownloadFile[], options: ZipOptions): AsyncGenera
     });
 
     try {
-      const response = await fetcher(file.url, {
-        signal: options.signal,
-        credentials: "include",
-        redirect: "follow",
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
-      }
-
-      const totalBytes = parseContentLength(response);
-      const body = response.body;
+      const opened = await source.open(options.signal);
+      const totalBytes = opened.totalBytes;
       let loadedBytes = 0;
       let input: ReadableStream<Uint8Array> | Uint8Array;
 
-      if (body) {
-        input = countBytes(body, (chunkBytes) => {
+      if (opened.body instanceof Uint8Array) {
+        loadedBytes = opened.body.byteLength;
+        input = opened.body;
+      } else {
+        input = countBytes(opened.body, (chunkBytes) => {
           loadedBytes += chunkBytes;
           const fraction = totalBytes ? loadedBytes / totalBytes : 0;
           options.onProgress?.({
@@ -100,10 +127,6 @@ async function* entries(files: DownloadFile[], options: ZipOptions): AsyncGenera
             overallPercent: ((index + fraction) / total) * 100,
           });
         });
-      } else {
-        const buffer = new Uint8Array(await response.arrayBuffer());
-        loadedBytes = buffer.byteLength;
-        input = buffer;
       }
 
       yield { name, input };
@@ -114,7 +137,7 @@ async function* entries(files: DownloadFile[], options: ZipOptions): AsyncGenera
         total,
         filename: name,
         loadedBytes,
-        totalBytes,
+        totalBytes: totalBytes ?? loadedBytes,
         filePercent: 100,
         overallPercent: ((index + 1) / total) * 100,
       });

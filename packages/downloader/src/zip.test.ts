@@ -1,20 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-import { createZipStream, type DownloadFile, type ZipProgressEvent } from "./zip";
-
-function fakeFetch(payloads: Record<string, Uint8Array>): typeof globalThis.fetch {
-  return (async (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input.toString();
-    const payload = payloads[url];
-    if (!payload) return new Response("not found", { status: 404, statusText: "Not Found" });
-
-    return new Response(payload.buffer as ArrayBuffer, {
-      status: 200,
-      headers: { "content-length": String(payload.byteLength) },
-    });
-  }) as typeof globalThis.fetch;
-}
+import { createZipStream, type DownloadSource, urlSource, type ZipProgressEvent } from "./zip";
 
 const encode = (text: string) => new TextEncoder().encode(text);
+
+/** Fonte que entrega os bytes como stream (exercita o caminho com progresso). */
+function streamSource(filename: string, payload: Uint8Array): DownloadSource {
+  return {
+    filename,
+    async open() {
+      const response = new Response(payload.buffer as ArrayBuffer, {
+        headers: { "content-length": String(payload.byteLength) },
+      });
+      return { body: response.body ?? payload, totalBytes: payload.byteLength };
+    },
+  };
+}
 
 async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
@@ -36,23 +36,26 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
   return merged;
 }
 
+describe("urlSource", () => {
+  it("baixa via fetch injetável e informa o tamanho", async () => {
+    const fetcher = (async () =>
+      new Response(encode("ABC").buffer as ArrayBuffer, {
+        status: 200,
+        headers: { "content-length": "3" },
+      })) as typeof globalThis.fetch;
+
+    const opened = await urlSource("https://cdn.test/a.mp4", "a.mp4", fetcher).open();
+
+    expect(opened.totalBytes).toBe(3);
+  });
+});
+
 describe("createZipStream", () => {
-  it("empacota os arquivos e reporta progresso do arquivo e geral", async () => {
-    const files: DownloadFile[] = [
-      { url: "https://cdn.test/a.mp4", filename: "a.mp4" },
-      { url: "https://cdn.test/b.mp4", filename: "a.mp4" },
-    ];
+  it("empacota as fontes e reporta progresso do arquivo e geral", async () => {
+    const sources = [streamSource("a.mp4", encode("AAA")), streamSource("a.mp4", encode("BBB"))];
     const events: ZipProgressEvent[] = [];
 
-    const bytes = await readAll(
-      createZipStream(files, {
-        fetch: fakeFetch({
-          "https://cdn.test/a.mp4": encode("AAA"),
-          "https://cdn.test/b.mp4": encode("BBB"),
-        }),
-        onProgress: (event) => events.push(event),
-      }),
-    );
+    const bytes = await readAll(createZipStream(sources, { onProgress: (e) => events.push(e) }));
     const text = new TextDecoder().decode(bytes);
 
     expect(text.startsWith("PK")).toBe(true);
@@ -67,13 +70,14 @@ describe("createZipStream", () => {
 
   it("sinaliza erro e segue em frente", async () => {
     const onProgress = vi.fn<(event: ZipProgressEvent) => void>();
+    const failing: DownloadSource = {
+      filename: "x.mp4",
+      async open() {
+        throw new Error("HTTP 404 Not Found");
+      },
+    };
 
-    await readAll(
-      createZipStream([{ url: "https://cdn.test/missing", filename: "x.mp4" }], {
-        fetch: fakeFetch({}),
-        onProgress,
-      }),
-    );
+    await readAll(createZipStream([failing], { onProgress }));
 
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: "error" }));
   });

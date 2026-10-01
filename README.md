@@ -8,6 +8,7 @@ tudo em *streaming*, sem estourar a RAM.
 | ----------------- | --------------------- | ------------------------------------------------------------------------- |
 | `@repo/protocol`  | `packages/protocol`   | Schemas e tipagens compartilhadas (**Zod**, reexportado)                   |
 | `@repo/media`     | `packages/media`      | Identificação de mídia: content-type/extensão → tipo, nome de arquivo, auto-seleção (puro/testável) |
+| `@repo/streams`   | `packages/streams`    | Resolução de manifestos **HLS/DASH** (m3u8-parser/fast-xml-parser) e metadados de stream |
 | `@repo/downloader`| `packages/downloader` | Download em streaming + ZIP (`client-zip`) gravando direto no disco        |
 | `@repo/ui`        | `packages/ui`         | Componentes **shadcn/ui** (Tailwind v4, exportados em source)              |
 | `@apps/ext`       | `apps/ext`            | Extensão Chrome (MV3, **Side Panel**) com Vite + React + CRXJS             |
@@ -40,12 +41,15 @@ pnpm install
 
 1. O **service worker** registra `chrome.webRequest.onHeadersReceived` e observa as respostas que
    são mídia (imagem, vídeo, áudio, documento, arquivo). Manifestos `.m3u8`/`.mpd` entram como
-   `stream` (HLS/DASH).
+   `streamType` (HLS/DASH).
 2. `@repo/media` classifica cada resposta (tipo, nome de arquivo a partir do
    `Content-Disposition`/URL, tamanho) e o item é gravado em `chrome.storage.session`.
-3. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
+3. **S1 (eager-manifest)**: para cada manifesto, `@repo/streams` baixa o `.m3u8`/`.mpd` (alguns KB) e
+   enriquece o item com **variantes, duração, container (TS/fMP4), criptografia e tamanho estimado**.
+   A qualidade escolhida segue a preferência **“Qualidade do stream”** (padrão: melhor).
+4. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
    os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
-4. Ao clicar em **Baixar**, o download e a montagem do ZIP acontecem **juntos, em streaming** (um
+5. Ao clicar em **Baixar**, o download e a montagem do ZIP acontecem **juntos, em streaming** (um
    arquivo por vez, gravando direto no disco). A UI mostra **duas barras**: **"Download"** (progresso
    do vídeo atual) e **"ZIP"** (vídeos baixados ÷ total). Ao terminar, o progresso é **resetado** e um
    **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para mídia, que já é
@@ -79,12 +83,25 @@ Lógica pura (sem `chrome.*`), por isso 100% testável:
 - `classifyResponse(details)` → item de mídia (ou `null` se não for mídia).
 - `deriveFilename(...)`, `sanitizeFilename(...)`, `filenameFromContentDisposition(...)`.
 - `shouldAutoSelect(item, prefs)`, `matchesKind(...)`, `matchesTab(...)`, `matchesQuery(...)`.
-- `formatBytes(...)`, `KIND_LABELS`, `MEDIA_KINDS`.
+- `selectVariant(variants, policy)`, `variantLabel(variant)` (HLS/DASH).
+- `formatBytes(...)`, `formatDuration(...)`, `KIND_LABELS`, `STREAM_LABELS`, `MEDIA_KINDS`.
+
+## `@repo/streams`
+
+Resolução de manifestos na **Fase A (etapa S1)** — sem baixar segmentos ainda:
+
+- `parseHlsManifest(text, baseUrl)` → variantes (master) ou container/criptografia/segmentos/live.
+- `parseDashManifest(xml, baseUrl)` → representações de vídeo, duração e live.
+- `resolveStreamInfo({ url, streamType }, { fetch? })` → `Partial<StreamInfo>` (S1).
+- Helpers: `resolveUrl`, `positiveInt`, `asArray`, `asString`, `estimateBytes`, `parseIsoDuration`.
+
+> A conversão **TS/fMP4 → MP4** com `mux.js` (e o download dos segmentos) entra na **Fase B**.
 
 ## `@repo/downloader`
 
-Baixa e zipa na **mesma esteira** (`client-zip` puxa um arquivo por vez, sem manter o conteúdo na
-RAM). `createZipStream(files, { fetch, onProgress, signal })` emite dois progressos por evento:
+Baixa e zipa na **mesma esteira** (`client-zip` puxa uma fonte por vez, sem manter o conteúdo na
+RAM). Cada entrada é uma `DownloadSource` (`{ filename, open(signal) }`); `urlSource(url, filename)`
+é a fonte padrão. `createZipStream(sources, { onProgress, signal })` emite dois progressos por evento:
 
 - `filePercent` → progresso do **arquivo atual** (barra "Download");
 - `overallPercent` → **arquivos baixados ÷ total** (barra "ZIP").

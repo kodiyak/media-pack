@@ -34,6 +34,11 @@ catalog:
   # --- Download / ZIP ---
   client-zip: 2.5.1
 
+  # --- Streams (HLS/DASH) ---
+  m3u8-parser: 7.2.0
+  "@types/m3u8-parser": 7.2.6
+  fast-xml-parser: 5.11.2
+
   # --- Build / Chrome extension ---
   vite: 8.3.2
   "@vitejs/plugin-react": 6.1.1
