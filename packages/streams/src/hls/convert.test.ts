@@ -167,6 +167,81 @@ describe("openHlsStream", () => {
   });
 });
 
+const MASTER_WITH_AUDIO = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO="aud"
+720/index.m3u8
+`;
+
+describe("openHlsStream (mux de áudio)", () => {
+  it("remuxa vídeo + áudio quando o master separa o áudio", async () => {
+    const calls: Array<{ video: Uint8Array; audio: Uint8Array }> = [];
+    const mux = async (video: Uint8Array, audio: Uint8Array) => {
+      calls.push({ video, audio });
+      return encode("MUXED");
+    };
+
+    const { fetch } = fakeFetch({
+      "https://cdn.test/master.m3u8": MASTER_WITH_AUDIO,
+      "https://cdn.test/720/index.m3u8": MEDIA_FMP4,
+      "https://cdn.test/720/init.mp4": encode("I"),
+      "https://cdn.test/720/seg0.m4s": encode("A"),
+      "https://cdn.test/720/seg1.m4s": encode("B"),
+      "https://cdn.test/audio/en.m3u8": MEDIA_FMP4,
+      "https://cdn.test/audio/init.mp4": encode("i"),
+      "https://cdn.test/audio/seg0.m4s": encode("a"),
+      "https://cdn.test/audio/seg1.m4s": encode("b"),
+    });
+
+    const opened = await openHlsStream({ url: "https://cdn.test/master.m3u8" }, { fetch, mux });
+
+    expect(opened.muxed).toBe(true);
+    expect(new TextDecoder().decode(await readAll(opened.body))).toBe("MUXED");
+    expect(calls).toHaveLength(1);
+    expect(new TextDecoder().decode(calls[0]?.video ?? new Uint8Array())).toBe("IAB");
+    expect(new TextDecoder().decode(calls[0]?.audio ?? new Uint8Array())).toBe("iab");
+  });
+
+  it("cai no vídeo sem áudio quando o mux falha", async () => {
+    const mux = async () => {
+      throw new Error("mux quebrado");
+    };
+
+    const { fetch } = fakeFetch({
+      "https://cdn.test/master.m3u8": MASTER_WITH_AUDIO,
+      "https://cdn.test/720/index.m3u8": MEDIA_FMP4,
+      "https://cdn.test/720/init.mp4": encode("I"),
+      "https://cdn.test/720/seg0.m4s": encode("A"),
+      "https://cdn.test/720/seg1.m4s": encode("B"),
+      "https://cdn.test/audio/en.m3u8": MEDIA_FMP4,
+      "https://cdn.test/audio/init.mp4": encode("i"),
+      "https://cdn.test/audio/seg0.m4s": encode("a"),
+      "https://cdn.test/audio/seg1.m4s": encode("b"),
+    });
+
+    const opened = await openHlsStream({ url: "https://cdn.test/master.m3u8" }, { fetch, mux });
+
+    expect(opened.muxed).toBe(false);
+    expect(new TextDecoder().decode(await readAll(opened.body))).toBe("IAB");
+  });
+
+  it("cai no vídeo sem áudio quando o áudio não existe", async () => {
+    const { fetch } = fakeFetch({
+      "https://cdn.test/master.m3u8": MASTER_WITH_AUDIO,
+      "https://cdn.test/720/index.m3u8": MEDIA_FMP4,
+      "https://cdn.test/720/init.mp4": encode("I"),
+      "https://cdn.test/720/seg0.m4s": encode("A"),
+      "https://cdn.test/720/seg1.m4s": encode("B"),
+      // sem https://cdn.test/audio/en.m3u8 → 404
+    });
+
+    const opened = await openHlsStream({ url: "https://cdn.test/master.m3u8" }, { fetch });
+
+    expect(opened.muxed).toBe(false);
+    expect(new TextDecoder().decode(await readAll(opened.body))).toBe("IAB");
+  });
+});
+
 describe("hlsOutputFilename", () => {
   it("troca a extensão para .mp4", () => {
     expect(hlsOutputFilename({ filename: "filme.m3u8" })).toBe("filme.mp4");

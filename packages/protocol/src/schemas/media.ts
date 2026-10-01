@@ -24,6 +24,8 @@ export const streamVariantSchema = z.object({
   height: z.number().int().positive().optional(),
   codecs: z.string().optional(),
   label: z.string().optional(),
+  /** Grupo de áudio (EXT-X-STREAM-INF AUDIO) quando a variante tem áudio separado. */
+  audioGroupId: z.string().optional(),
 });
 export type StreamVariant = z.infer<typeof streamVariantSchema>;
 

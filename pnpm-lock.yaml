@@ -69,6 +69,9 @@ catalogs:
     m3u8-parser:
       specifier: 7.2.0
       version: 7.2.0
+    mp4box:
+      specifier: 2.4.1
+      version: 2.4.1
     mux.js:
       specifier: 6.3.0
       version: 6.3.0
@@ -303,6 +306,9 @@ importers:
       m3u8-parser:
         specifier: 'catalog:'
         version: 7.2.0
+      mp4box:
+        specifier: 'catalog:'
+        version: 2.4.1
       mux.js:
         specifier: 'catalog:'
         version: 6.3.0
@@ -2896,6 +2902,10 @@ packages:
   minipass@7.1.3:
     resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
     engines: {node: '>=16 || 14 >=14.17'}
+
+  mp4box@2.4.1:
+    resolution: {integrity: sha512-0HGX7nXoDIX6FKLVl4a3wtYjBlwqsN3xuQC3GXzNtKp98FXUOhDSq623azsz8DG5ptd9ZXcXodDkgbdMZOjWvw==}
+    engines: {node: '>=20.8.1'}
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
@@ -6064,6 +6074,8 @@ snapshots:
   minimist@1.2.8: {}
 
   minipass@7.1.3: {}
+
+  mp4box@2.4.1: {}
 
   ms@2.1.3: {}
 

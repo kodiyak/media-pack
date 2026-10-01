@@ -19,6 +19,7 @@
     "@repo/protocol": "workspace:*",
     "fast-xml-parser": "catalog:",
     "m3u8-parser": "catalog:",
+    "mp4box": "catalog:",
     "mux.js": "catalog:"
   },
   "devDependencies": {

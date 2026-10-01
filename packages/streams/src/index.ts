@@ -6,6 +6,7 @@ export * from "./hls/convert";
 export * from "./hls/manifest";
 export * from "./hls/playlist";
 export * from "./mp4/track";
+export * from "./mux/mp4box";
 export * from "./names";
 export * from "./resolve";
 export * from "./transmux";

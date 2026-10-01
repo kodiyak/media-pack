@@ -2,11 +2,23 @@ import type { StreamEncryption, StreamVariant } from "@repo/protocol";
 import { Parser } from "m3u8-parser";
 import { positiveInt, resolveUrl } from "../util";
 
+/** Rendição de áudio separada (EXT-X-MEDIA TYPE=AUDIO) em uma master playlist. */
+export type HlsAudioRendition = {
+  url?: string;
+  groupId?: string;
+  name?: string;
+  language?: string;
+  isDefault?: boolean;
+  autoSelect?: boolean;
+};
+
 /** Metadados extraídos de um manifesto HLS (master ou media playlist). */
 export type HlsManifestInfo = {
   variants?: StreamVariant[];
   /** URLs de todas as rendições (vídeo/áudio/legenda) — somente em master. */
   renditionUrls?: string[];
+  /** Rendições de áudio separadas (EXT-X-MEDIA TYPE=AUDIO). */
+  audioRenditions?: HlsAudioRendition[];
   container?: "ts" | "fmp4";
   encryption?: StreamEncryption;
   live?: boolean;
@@ -21,6 +33,7 @@ type HlsPlaylist = {
     CODECS?: string;
     NAME?: string;
     RESOLUTION?: { width?: number; height?: number };
+    AUDIO?: string;
   };
 };
 
@@ -31,7 +44,12 @@ type HlsSegment = {
   map?: { uri?: string };
 };
 
-type HlsRendering = { uri?: string };
+type HlsRendering = {
+  uri?: string;
+  language?: string;
+  default?: boolean;
+  autoselect?: boolean;
+};
 
 type HlsManifest = {
   playlists?: HlsPlaylist[];
@@ -52,10 +70,50 @@ export function parseHlsManifest(text: string, baseUrl: string): HlsManifestInfo
     return {
       variants: playlists.map((playlist) => toVariant(playlist, baseUrl)),
       renditionUrls: collectRenditionUrls(manifest, baseUrl),
+      audioRenditions: collectAudioRenditions(manifest, baseUrl),
     };
   }
 
   return parseMediaPlaylist(manifest);
+}
+
+/** Escolhe a rendição de áudio de um grupo (padrão/autoselecionada, senão a primeira). */
+export function selectAudioRendition(
+  renditions: HlsAudioRendition[] | undefined,
+  groupId?: string,
+): HlsAudioRendition | undefined {
+  const pool = renditions?.filter((entry) => !groupId || entry.groupId === groupId) ?? [];
+  if (pool.length === 0) return undefined;
+  return (
+    pool.find((entry) => entry.isDefault && entry.autoSelect) ??
+    pool.find((entry) => entry.isDefault) ??
+    pool[0]
+  );
+}
+
+function collectAudioRenditions(
+  manifest: HlsManifest,
+  baseUrl: string,
+): HlsAudioRendition[] | undefined {
+  const result: HlsAudioRendition[] = [];
+
+  for (const [groupId, renderings] of Object.entries(manifest.mediaGroups?.AUDIO ?? {})) {
+    for (const [name, rendering] of Object.entries(renderings ?? {})) {
+      if (!rendering.uri) continue;
+      const url = resolveUrl(rendering.uri, baseUrl);
+      if (!url) continue;
+      result.push({
+        url,
+        groupId,
+        name,
+        language: rendering.language,
+        isDefault: rendering.default === true,
+        autoSelect: rendering.autoselect === true,
+      });
+    }
+  }
+
+  return result.length > 0 ? result : undefined;
 }
 
 function collectRenditionUrls(manifest: HlsManifest, baseUrl: string): string[] | undefined {
@@ -91,6 +149,7 @@ function toVariant(playlist: HlsPlaylist, baseUrl: string): StreamVariant {
     height: positiveInt(resolution?.height),
     codecs: attributes.CODECS,
     label: resolution?.height ? `${resolution.height}p` : attributes.NAME,
+    audioGroupId: attributes.AUDIO,
   };
 }
 

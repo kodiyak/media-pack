@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseHlsManifest } from "./manifest";
+import { parseHlsManifest, selectAudioRendition } from "./manifest";
 
 const MASTER = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.4d401e,mp4a.40.2"
@@ -72,5 +72,77 @@ describe("parseHlsManifest", () => {
     const info = parseHlsManifest(live, "https://cdn.test/index.m3u8");
 
     expect(info.live).toBe(true);
+  });
+});
+
+const MASTER_AUDIO_GROUPS = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Spanish",DEFAULT=NO,LANGUAGE="es",URI="audio/es.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="alt",NAME="Alternate",DEFAULT=YES,AUTOSELECT=YES,URI="audio/alt.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO="aud"
+720/index.m3u8
+`;
+
+describe("parseHlsManifest (áudio separado)", () => {
+  it("extrai as rendições de áudio com grupo e idioma", () => {
+    const info = parseHlsManifest(MASTER_AUDIO_GROUPS, "https://cdn.test/master.m3u8");
+
+    expect(info.audioRenditions).toHaveLength(3);
+    expect(info.audioRenditions?.[0]).toMatchObject({
+      groupId: "aud",
+      name: "English",
+      language: "en",
+      isDefault: true,
+      autoSelect: true,
+      url: "https://cdn.test/audio/en.m3u8",
+    });
+    expect(info.variants?.[0]?.audioGroupId).toBe("aud");
+  });
+
+  it("expõe renditionUrls incluindo áudio (para dedupe)", () => {
+    const info = parseHlsManifest(MASTER_AUDIO_GROUPS, "https://cdn.test/master.m3u8");
+
+    expect(info.renditionUrls).toContain("https://cdn.test/audio/en.m3u8");
+    expect(info.renditionUrls).toContain("https://cdn.test/audio/es.m3u8");
+    expect(info.renditionUrls).toContain("https://cdn.test/720/index.m3u8");
+  });
+});
+
+describe("selectAudioRendition", () => {
+  const renditions = [
+    {
+      groupId: "aud",
+      name: "Comentário",
+      url: "https://cdn.test/c.m3u8",
+      isDefault: false,
+      autoSelect: false,
+    },
+    {
+      groupId: "aud",
+      name: "English",
+      url: "https://cdn.test/en.m3u8",
+      isDefault: true,
+      autoSelect: true,
+    },
+    {
+      groupId: "aud",
+      name: "Spanish",
+      url: "https://cdn.test/es.m3u8",
+      isDefault: false,
+      autoSelect: false,
+    },
+  ];
+
+  it("prefere a rendição default + autoselecionada", () => {
+    expect(selectAudioRendition(renditions, "aud")?.url).toBe("https://cdn.test/en.m3u8");
+  });
+
+  it("filtra por grupo e cai na primeira quando não há default", () => {
+    const noDefault = renditions.map((r) => ({ ...r, isDefault: false }));
+    expect(selectAudioRendition(noDefault, "aud")?.url).toBe("https://cdn.test/c.m3u8");
+  });
+
+  it("retorna undefined para grupo inexistente", () => {
+    expect(selectAudioRendition(renditions, "outro")).toBeUndefined();
   });
 });
