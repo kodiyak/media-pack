@@ -1,3 +1,4 @@
+import { ThemeProvider } from "@repo/ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -12,6 +13,8 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <ThemeProvider defaultTheme="system" storageKey="media-pack-theme">
+      <App />
+    </ThemeProvider>
   </StrictMode>,
 );

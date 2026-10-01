@@ -2,14 +2,15 @@ import {
   buildZipName,
   canUseFileSystemAccess,
   createZipStream,
-  saveStreamAsBlob,
-  saveStreamWithPicker,
+  prepareZipSink,
+  toErrorMessage,
   type ZipProgressEvent,
 } from "@repo/downloader";
 import {
   formatBytes,
   KIND_LABELS,
   MEDIA_KINDS,
+  matchesKind,
   matchesQuery,
   matchesTab,
   shouldAutoSelect,
@@ -24,12 +25,15 @@ import {
   CardTitle,
   Checkbox,
   Input,
+  ModeToggle,
   Progress,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Toaster,
+  toast,
 } from "@repo/ui";
 import {
   Download,
@@ -63,12 +67,10 @@ const SIZE_OPTIONS: { label: string; value: number }[] = [
   { label: "Mais de 10 MB", value: 10 * 1024 * 1024 },
 ];
 
-type JobState = {
-  done: number;
-  total: number;
+type ProgressState = {
   label: string;
+  detail: string;
   percent: number;
-  errors: number;
 };
 
 export function App() {
@@ -78,7 +80,9 @@ export function App() {
 
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
-  const [job, setJob] = useState<JobState | null>(null);
+  const [downloadJob, setDownloadJob] = useState<ProgressState | null>(null);
+  const [zipJob, setZipJob] = useState<ProgressState | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const searchId = useId();
@@ -86,9 +90,12 @@ export function App() {
   const visible = useMemo(
     () =>
       media.filter(
-        (item) => matchesTab(item, currentTabId, prefs.onlyCurrentTab) && matchesQuery(item, query),
+        (item) =>
+          matchesKind(item, prefs.autoSelectKinds) &&
+          matchesTab(item, currentTabId, prefs.onlyCurrentTab) &&
+          matchesQuery(item, query),
       ),
-    [media, currentTabId, prefs.onlyCurrentTab, query],
+    [media, currentTabId, prefs.onlyCurrentTab, prefs.autoSelectKinds, query],
   );
 
   const isSelected = useCallback(
@@ -130,7 +137,9 @@ export function App() {
   const handleClear = useCallback(() => {
     void clearStoredMedia();
     setOverrides({});
-    setJob(null);
+    setDownloadJob(null);
+    setZipJob(null);
+    setError(null);
   }, []);
 
   const handleDownload = useCallback(async () => {
@@ -140,81 +149,59 @@ export function App() {
       url: item.url,
       filename: item.filename ?? `media-${item.id}`,
     }));
+
     const controller = new AbortController();
     abortRef.current = controller;
     setBusy(true);
-    setJob({ done: 0, total: files.length, label: "Preparando…", percent: 0, errors: 0 });
+    setError(null);
+    setDownloadJob({ label: "Preparando…", detail: "", percent: 0 });
+    setZipJob({ label: "Baixando vídeos…", detail: `0/${files.length}`, percent: 0 });
 
     const onProgress = (event: ZipProgressEvent) => {
-      setJob((current) => {
-        const base = current ?? {
-          done: 0,
-          total: files.length,
-          label: "",
-          percent: 0,
-          errors: 0,
-        };
-        if (event.phase === "fetching") {
-          return {
-            ...base,
-            label: `Baixando ${event.filename}`,
-            percent: (event.index / event.total) * 100,
-          };
-        }
-        if (event.phase === "progress") {
-          const fraction = event.totalBytes ? event.loadedBytes / event.totalBytes : 0;
-          return {
-            ...base,
-            label: `Baixando ${event.filename}`,
-            percent: ((event.index + fraction) / event.total) * 100,
-          };
-        }
-        if (event.phase === "done") {
-          return {
-            ...base,
-            done: event.index + 1,
-            label: `${event.filename} adicionado`,
-            percent: ((event.index + 1) / event.total) * 100,
-          };
-        }
-        return { ...base, errors: base.errors + 1, label: `Falhou: ${event.filename}` };
+      if (event.phase === "error") {
+        setError(`Falhou: ${event.filename} (${event.error})`);
+      }
+
+      // Barra 1: progresso do arquivo atual.
+      setDownloadJob({
+        label: `Baixando ${event.filename}`,
+        detail: `${formatBytes(event.loadedBytes)}${
+          event.totalBytes ? ` / ${formatBytes(event.totalBytes)}` : ""
+        }`,
+        percent: event.filePercent,
+      });
+
+      // Barra 2: vídeos baixados comparados ao total.
+      setZipJob({
+        label: "Baixando vídeos…",
+        detail: `${Math.min(event.index + 1, event.total)}/${event.total}`,
+        percent: event.overallPercent,
       });
     };
 
-    try {
-      const stream = createZipStream(files, { onProgress, signal: controller.signal });
-      const zipName = buildZipName();
+    type Sink = Awaited<ReturnType<typeof prepareZipSink>>;
+    let sink: Sink | null = null;
 
-      if (canUseFileSystemAccess()) {
-        const saved = await saveStreamWithPicker(stream, zipName);
-        setJob({
-          done: files.length,
-          total: files.length,
-          label: `Salvo como ${saved}`,
-          percent: 100,
-          errors: 0,
-        });
-      } else {
-        await saveStreamAsBlob(stream, zipName);
-        setJob({
-          done: files.length,
-          total: files.length,
-          label: `Baixado ${zipName}`,
-          percent: 100,
-          errors: 0,
-        });
-      }
-    } catch (error) {
+    try {
+      // O seletor de arquivo precisa acontecer dentro do gesto do usuário.
+      sink = await prepareZipSink(buildZipName());
+
+      await sink.write(createZipStream(files, { signal: controller.signal, onProgress }));
+
+      toast.success("ZIP salvo", { description: sink.name });
+
+      // Finalizado: reseta o progresso.
+      setDownloadJob(null);
+      setZipJob(null);
+    } catch (cause) {
       if (controller.signal.aborted) {
-        setJob(null);
+        await sink?.abort();
+        toast.info("Download cancelado");
+        setDownloadJob(null);
+        setZipJob(null);
       } else {
-        setJob((current) => ({
-          done: current?.done ?? 0,
-          total: files.length,
-          label: `Erro: ${error instanceof Error ? error.message : String(error)}`,
-          percent: current?.percent ?? 0,
-          errors: (current?.errors ?? 0) + 1,
-        }));
+        setError(toErrorMessage(cause));
+        toast.error("Falha no download", { description: toErrorMessage(cause) });
       }
     } finally {
       abortRef.current = null;
@@ -230,6 +217,7 @@ export function App() {
         <Badge variant="secondary">
           {selected.length}/{visible.length}
         </Badge>
+        <ModeToggle />
         <Button
           variant="ghost"
           size="icon"
@@ -247,7 +235,7 @@ export function App() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium">Auto-selecionar tipo</span>
+            <span className="text-sm font-medium">Mostrar e auto-selecionar</span>
             <div className="flex flex-wrap gap-1.5">
               {MEDIA_KINDS.map((kind) => (
                 <Button
@@ -373,17 +361,17 @@ export function App() {
       </section>
 
       <footer className="sticky bottom-0 flex flex-col gap-2 border-t bg-background p-4">
-        {job ? (
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-              <span className="truncate">{job.label}</span>
-              <span className="shrink-0">
-                {job.done}/{job.total}
-                {job.errors > 0 ? ` · ${job.errors} falha(s)` : ""}
-              </span>
-            </div>
-            <Progress value={job.percent} />
+        {downloadJob || zipJob ? (
+          <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
+            <ProgressRow label="Download" job={downloadJob} />
+            <ProgressRow label="ZIP" job={zipJob} />
           </div>
+        ) : null}
+
+        {error ? (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
         ) : null}
 
         <div className="flex gap-2">
@@ -393,7 +381,7 @@ export function App() {
             onClick={() => void handleDownload()}
           >
             <Download />
-            {busy ? "Baixando…" : `Baixar ${selected.length} (.zip)`}
+            {busy ? "Processando…" : `Baixar ${selected.length} (.zip)`}
           </Button>
           {busy ? (
             <Button variant="outline" onClick={() => abortRef.current?.abort()}>
@@ -404,10 +392,27 @@ export function App() {
 
         <p className="text-xs text-muted-foreground">
           {canUseFileSystemAccess()
-            ? "O ZIP é gravado em streaming direto no disco."
+            ? "Baixa tudo e grava o ZIP em streaming direto no disco."
             : "Seu navegador vai baixar o ZIP pela memória."}
         </p>
       </footer>
+
+      <Toaster position="top-center" />
     </main>
+  );
+}
+
+function ProgressRow({ label, job }: { label: string; job: ProgressState | null }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="font-medium">{label}</span>
+        <span className="text-muted-foreground">{Math.round(job?.percent ?? 0)}%</span>
+      </div>
+      <Progress value={job?.percent ?? 0} />
+      <span className="truncate text-xs text-muted-foreground">
+        {job ? `${job.label} · ${job.detail}` : "Aguardando…"}
+      </span>
+    </div>
   );
 }

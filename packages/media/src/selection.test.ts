@@ -1,7 +1,7 @@
 import { DEFAULT_MEDIA_PREFS, type MediaItem, mediaItemSchema } from "@repo/protocol";
 import { describe, expect, it } from "vitest";
 import { formatBytes } from "./format";
-import { matchesQuery, matchesTab, shouldAutoSelect } from "./selection";
+import { matchesKind, matchesQuery, matchesTab, shouldAutoSelect } from "./selection";
 
 function makeItem(partial: Partial<MediaItem>): MediaItem {
   return mediaItemSchema.parse({
@@ -27,6 +27,17 @@ describe("shouldAutoSelect", () => {
     const prefs = { ...DEFAULT_MEDIA_PREFS, minSizeInBytes: 1000 };
     expect(shouldAutoSelect(makeItem({ sizeInBytes: 10 }), prefs)).toBe(false);
     expect(shouldAutoSelect(makeItem({ sizeInBytes: 2000 }), prefs)).toBe(true);
+  });
+});
+
+describe("matchesKind", () => {
+  it("mostra tudo quando nenhum tipo está marcado", () => {
+    expect(matchesKind(makeItem({ kind: "image" }), [])).toBe(true);
+  });
+
+  it("mostra apenas os tipos marcados", () => {
+    expect(matchesKind(makeItem({ kind: "video" }), ["video"])).toBe(true);
+    expect(matchesKind(makeItem({ kind: "image" }), ["video"])).toBe(false);
   });
 });
 

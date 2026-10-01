@@ -1,3 +1,9 @@
+export type ZipSink = {
+  readonly name: string;
+  write(stream: ReadableStream<Uint8Array>): Promise<void>;
+  abort(): Promise<void>;
+};
+
 export type FileHandleLike = {
   readonly name: string;
   createWritable(): Promise<WritableStream<Uint8Array>>;
@@ -19,36 +25,43 @@ export function canUseFileSystemAccess(): boolean {
 }
 
 /**
- * Grava o stream do ZIP direto no arquivo escolhido pelo usuário.
- * Precisa ser chamado a partir de um gesto do usuário (clique).
+ * Prepara o destino do ZIP **antes** do download. Precisa ser chamado no gesto
+ * do usuário (clique) para o seletor de arquivo funcionar.
  */
-export async function saveStreamWithPicker(
-  stream: ReadableStream<Uint8Array>,
-  suggestedName: string,
-): Promise<string> {
+export async function prepareZipSink(suggestedName: string): Promise<ZipSink> {
   const picker = getSaveFilePicker();
-  if (!picker) {
-    throw new Error("Seu navegador não suporta gravar em disco (File System Access API).");
+
+  if (picker && typeof document !== "undefined") {
+    const handle = await picker({
+      suggestedName,
+      types: [{ description: "Arquivo ZIP", accept: { "application/zip": [".zip"] } }],
+    });
+    const writable = await handle.createWritable();
+
+    return {
+      name: handle.name,
+      async write(stream) {
+        await stream.pipeTo(writable);
+      },
+      async abort() {
+        await writable.abort().catch(() => {});
+      },
+    };
   }
 
-  const handle = await picker({
-    suggestedName,
-    types: [{ description: "Arquivo ZIP", accept: { "application/zip": [".zip"] } }],
-  });
-
-  const writable = await handle.createWritable();
-  await stream.pipeTo(writable);
-  return handle.name;
+  return {
+    name: suggestedName,
+    async write(stream) {
+      triggerDownload(await new Response(stream).blob(), suggestedName);
+    },
+    async abort() {
+      // nada a descartar
+    },
+  };
 }
 
-/** Fallback: buffferiza o ZIP na memória e dispara o download via `<a>`. */
-export async function saveStreamAsBlob(
-  stream: ReadableStream<Uint8Array>,
-  filename: string,
-): Promise<void> {
-  const blob = await new Response(stream).blob();
+function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
-
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
@@ -56,7 +69,6 @@ export async function saveStreamAsBlob(
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 

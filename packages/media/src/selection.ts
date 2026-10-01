@@ -1,4 +1,4 @@
-import type { MediaItem, MediaPrefs } from "@repo/protocol";
+import type { MediaItem, MediaKind, MediaPrefs } from "@repo/protocol";
 
 /** Regra de auto-seleção com base nas preferências do painel. */
 export function shouldAutoSelect(item: MediaItem, prefs: MediaPrefs): boolean {
@@ -12,6 +12,15 @@ export function shouldAutoSelect(item: MediaItem, prefs: MediaPrefs): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * Filtro de visibilidade por tipo: mostra apenas os tipos marcados.
+ * Sem nenhum tipo marcado, mostra tudo.
+ */
+export function matchesKind(item: MediaItem, autoSelectKinds: MediaKind[]): boolean {
+  if (autoSelectKinds.length === 0) return true;
+  return autoSelectKinds.includes(item.kind);
 }
 
 /** Filtro por aba (itens sem `tabId` são sempre mantidos). */

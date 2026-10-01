@@ -43,11 +43,13 @@ pnpm install
    `stream` (HLS/DASH).
 2. `@repo/media` classifica cada resposta (tipo, nome de arquivo a partir do
    `Content-Disposition`/URL, tamanho) e o item é gravado em `chrome.storage.session`.
-3. O **side panel** lista as mídias em tempo real, com **auto-seleção por tipo/tamanho** e seleção
-   manual (checkboxes + busca).
-4. Ao clicar em **Baixar**, `@repo/downloader` faz `fetch` de cada item e monta o ZIP com
-   `makeZip` (`ReadableStream`), gravando **direto no disco** pela File System Access API
-   (`showSaveFilePicker`) — sem bufferizar o ZIP inteiro. Sem suporte, cai para blob.
+3. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
+   os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
+4. Ao clicar em **Baixar**, o download e a montagem do ZIP acontecem **juntos, em streaming** (um
+   arquivo por vez, gravando direto no disco). A UI mostra **duas barras**: **"Download"** (progresso
+   do vídeo atual) e **"ZIP"** (vídeos baixados ÷ total). Ao terminar, o progresso é **resetado** e um
+   **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para mídia, que já é
+   comprimida.
 
 ## Catalog do pnpm
 
@@ -76,21 +78,30 @@ Lógica pura (sem `chrome.*`), por isso 100% testável:
 
 - `classifyResponse(details)` → item de mídia (ou `null` se não for mídia).
 - `deriveFilename(...)`, `sanitizeFilename(...)`, `filenameFromContentDisposition(...)`.
-- `shouldAutoSelect(item, prefs)`, `matchesTab(...)`, `matchesQuery(...)`.
+- `shouldAutoSelect(item, prefs)`, `matchesKind(...)`, `matchesTab(...)`, `matchesQuery(...)`.
 - `formatBytes(...)`, `KIND_LABELS`, `MEDIA_KINDS`.
 
 ## `@repo/downloader`
 
-- `createZipStream(files, options)` → `ReadableStream<Uint8Array>` (streaming, um arquivo por vez).
-- `saveStreamWithPicker(stream, name)` → grava no disco via File System Access API.
-- `saveStreamAsBlob(stream, name)` → fallback.
+Baixa e zipa na **mesma esteira** (`client-zip` puxa um arquivo por vez, sem manter o conteúdo na
+RAM). `createZipStream(files, { fetch, onProgress, signal })` emite dois progressos por evento:
+
+- `filePercent` → progresso do **arquivo atual** (barra "Download");
+- `overallPercent` → **arquivos baixados ÷ total** (barra "ZIP").
+
+Outros:
+
+- `prepareZipSink(name)` → `ZipSink` (grava com a File System Access API; fallback blob).
 - `buildZipName()` → `media-pack-<timestamp>.zip`.
-- Eventos de progresso por arquivo (`fetching` / `progress` / `done` / `error`).
 
 ## `@repo/ui` (shadcn)
 
 - Tema Tailwind v4 em `packages/ui/src/styles/globals.css`.
 - O app importa o CSS com `@import "@repo/ui/globals.css"` e aponta os `@source` para escanear o pacote.
+- **Tema (light/dark/system)**: `ThemeProvider` + `useTheme` seguem o guia **Vite** do shadcn
+  (provider próprio com `localStorage`/`matchMedia`, sem `next-themes`). O `ModeToggle` é o botão de
+  tema (`DropdownMenu`) exibido no topo do side panel.
+- **Avisos**: `Toaster` + `toast` (baseado no [sonner](https://ui.shadcn.com/docs/components/sonner)).
 - Adicione novos componentes shadcn sempre pelo CLI, dentro do pacote:
 
 ```bash
