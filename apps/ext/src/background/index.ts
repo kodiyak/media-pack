@@ -13,6 +13,7 @@ import {
   z,
 } from "@repo/protocol";
 import { resolveStreamInfo } from "@repo/streams";
+import { startAutoReload } from "./auto-reload";
 
 const MEDIA_KEY = "media";
 const DOWNLOAD_KEY = "downloadJob";
@@ -365,3 +366,6 @@ chrome.sidePanel
   .catch((error: unknown) => console.error("[media-pack] falha ao configurar o side panel", error));
 
 console.log("[media-pack] service worker iniciado");
+
+// Sem efeito em produção (só ativa com VITE_EXT_AUTO_RELOAD=1 no build).
+startAutoReload();

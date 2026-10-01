@@ -11,6 +11,7 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "dev:ext": "pnpm --filter @apps/ext dev:ext",
+    "dev:watch": "pnpm --filter @apps/ext dev:watch",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:watch": "turbo run test:watch",

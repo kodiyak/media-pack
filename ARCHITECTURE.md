@@ -491,10 +491,15 @@ next-themes**):
  pnpm test           Vitest (unit + integração por pacote)
  pnpm build          Vite (extensão) — emite dist/ com chunks lazy
  pnpm test:e2e       Vitest e2e do side panel
+ pnpm dev:watch      build em watch + WebSocket → chrome.runtime.reload()
 ```
 
 - **Lazy chunks**: `mp4box.all-*.js` só é carregado pelo offscreen (dynamic
   `import("mp4box")`), mantendo o bundle do side panel enxuto.
+- **Auto-reload (dev)**: `scripts/watch.mjs` roda `vite build --watch` e serve um
+  WebSocket; o service worker (`background/auto-reload.ts`) chama
+  `chrome.runtime.reload()` ao receber `reload`. Só é embutido com
+  `VITE_EXT_AUTO_RELOAD=1` (build de produção não inclui).
 - Testes de streams cobrem HLS/DASH (manifest, plan, convert), AES-128,
   `resolveStreamInfo` e o **round-trip de mux** (gera fMP4 → demux → remux → relê).
 

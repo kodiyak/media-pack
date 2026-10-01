@@ -47,6 +47,7 @@ catalog:
   "@crxjs/vite-plugin": 3.0.0
   "@types/chrome": 0.3.4
   "@types/node": 26.6.3
+  ws: 8.22.0
 
   # --- Testing ---
   vitest: 5.0.3

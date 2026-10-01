@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:ui": "vite --config vite.ui.config.ts",
     "dev:ext": "node scripts/dev-browser.mjs",
+    "dev:watch": "node scripts/watch.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "biome check .",
@@ -46,6 +47,7 @@
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:",
-    "vitest-environment-web-ext": "catalog:"
+    "vitest-environment-web-ext": "catalog:",
+    "ws": "catalog:"
   }
 }

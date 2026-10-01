@@ -28,6 +28,7 @@ pnpm install
 | ------------------- | ------------------------------------------------------ |
 | `pnpm dev`          | Vite/CRXJS dev server (carregue `dist` manualmente)    |
 | `pnpm dev:ext`      | ⭐ Abre um Chromium novo com a extensão + side panel (HMR) |
+| `pnpm dev:watch`    | 🔁 Build em watch que **recarrega a extensão sozinha** no seu Chrome |
 | `pnpm build`        | Build de todos os pacotes                              |
 | `pnpm typecheck`    | Checagem de tipos (`tsc --noEmit`)                     |
 | `pnpm test`         | Testes unitários (Vitest) — `test:watch` para watch    |
@@ -53,14 +54,17 @@ pnpm install
    **“Qualidade do stream”** (padrão: melhor).
 4. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
    os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
-5. Ao clicar em **Baixar**, o service worker cria o documento **offscreen** somente nesse momento.
-   O `client-zip` abre uma entrada por vez: a conversão daquela entrada roda em background, grava um
-   arquivo temporário no **OPFS**, e o ZIP lê esse arquivo em streaming. **HLS** vira **MP4** (fMP4
-   concatenado / TS → `mux.js` / AES-128 via WebCrypto); **DASH** vira **MP4 (vídeo) + `.m4a`
-   (áudio)**; streams não suportados (live/DRM) geram erro por entrada sem converter nada antes.
-   A UI mostra **duas barras**: **"Download"** (arquivo atual) e **"ZIP"** (arquivos ÷ total). Ao
-   terminar, o progresso é **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem
-   compressão) — ideal para mídia, que já é comprimida.
+5. Ao clicar em **Baixar**, o service worker cria o documento **offscreen** e **o download inteiro
+   roda ali** — não no painel. Isso deixa o download **persistente**: fechar e reabrir o side panel
+   **não interrompe** o ZIP (o painel se reconecta lendo o estado em `chrome.storage.session`).
+   O `FileSystemFileHandle` escolhido no seletor de arquivo é guardado no **IndexedDB** para o
+   offscreen gravar direto no disco; se não der, o ZIP é montado no **OPFS** e o painel mostra
+   **"Salvar ZIP"**. **HLS** vira **MP4** (fMP4 concatenado / TS → `mux.js` / AES-128 via WebCrypto,
+   com áudio remuxado via mp4box quando vem separado); **DASH** vira **MP4 (vídeo) + `.m4a` (áudio)**;
+   streams não suportados (live/DRM) geram erro por entrada. A UI mostra **duas barras**:
+   **"Download"** (arquivo atual) e **"ZIP"** (arquivos ÷ total). Ao terminar, o progresso é
+   **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para
+   mídia, que já é comprimida.
 
 ## Catalog do pnpm
 
@@ -130,17 +134,18 @@ Outros:
   arquivos protegidos durante um job nunca são removidos.
 - `buildZipName()` → `media-pack-<timestamp>.zip`.
 
-## Fase D — conversão lazy, offscreen e limpeza do OPFS
+## Fases D/E/F — download persistente, offscreen e limpeza do OPFS
 
-- O documento offscreen (`WORKERS`) não existe permanentemente: é criado pelo service worker somente
-  para a conversão solicitada pelo download e fechado ao terminar cada entrada.
+- O documento offscreen (`WORKERS`) é criado sob demanda pelo service worker e **orquestra o
+  download inteiro** (conversão + ZIP + gravação). Assim o download **sobrevive ao fechamento do
+  side panel**; o estado fica em `chrome.storage.session["downloadJob"]` e o painel se reconecta.
+- O `FileSystemFileHandle` do arquivo escolhido é guardado no **IndexedDB** (`handles`, chave =
+  `jobId`) para o offscreen gravar direto no disco. Se não conseguir usá-lo, o ZIP é montado no OPFS
+  (status `ready`) e o painel mostra **"Salvar ZIP"**.
 - O planejamento DASH para descobrir vídeo/áudio acontece depois do clique, mas ainda não baixa
   segmentos. HLS também só abre o manifesto e segmentos quando o ZIP pede a entrada.
-- O OPFS usa o diretório privado `media-pack-cache`. Cada arquivo temporário é removido após ser
-  lido pelo ZIP e novamente no `finally` do painel.
-- Há uma limpeza oportunística no início de cada job: arquivos com mais de **30 min**, acima de
-  **1 GiB** acumulado ou além de **12 arquivos** são removidos, do mais antigo para o mais novo.
-  Se o navegador/extensão morrer, o próximo download recupera esse lixo automaticamente.
+- O OPFS usa o diretório privado `media-pack-cache`. Cada temporário é removido após ser lido pelo
+  ZIP; há limpeza oportunística no início de cada job (**30 min**, **1 GiB** ou **12 arquivos**).
 - A política é testável sem navegador via `selectOpfsEntriesForDeletion(...)` em `@repo/downloader`.
 
 ## `@repo/ui` (shadcn)
@@ -164,12 +169,29 @@ Os componentes usam a convenção atual do shadcn: `cn` (de `cn`) e `radix-ui`.
 - `manifest.config.ts` declara o manifest MV3 com o **Side Panel** (`side_panel.default_path`),
   o service worker e as permissões `storage`, `webRequest`, `sidePanel` e `offscreen`.
 - `offscreen.html` é uma entrada adicional do build; ele só é criado/aberto dinamicamente pelo
-  service worker durante uma conversão iniciada pelo usuário.
+  service worker durante um download iniciado pelo usuário (e orquestra o ZIP inteiro).
 - `/src/background` → service worker (monitora a rede e grava em `chrome.storage.session`).
 - `/src/sidepanel` → React do painel (lista, seleção e download em ZIP).
 - Clique no ícone da extensão abre o side panel
   (`chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`).
 - O build gera `apps/ext/dist`; carregue em `chrome://extensions` com **"Carregar sem compactação"**.
+
+### Auto-reload no seu Chrome (`pnpm dev:watch`)
+
+Para não ficar clicando em **↻** a cada build:
+
+```bash
+pnpm dev:watch
+```
+
+Um script (`apps/ext/scripts/watch.mjs`) roda `vite build --watch` e serve um **WebSocket** local;
+a cada build ele manda `chrome.runtime.reload()` para a extensão carregada. O cliente de auto-reload
+só entra no build com `VITE_EXT_AUTO_RELOAD=1` (o `dev:watch` faz isso) — o build de produção normal
+**não** inclui.
+
+Primeira vez (o `dist` atual ainda não tem o cliente): rode `pnpm dev:watch`, espere o primeiro build
+e recarregue a extensão **uma vez** em `chrome://extensions`. Depois disso, salvar um arquivo já
+recarrega a extensão sozinho.
 
 ## Ver a UI rodando
 
