@@ -2,6 +2,7 @@ import {
   buildZipName,
   canUseFileSystemAccess,
   createZipStream,
+  type DownloadSource,
   prepareZipSink,
   toErrorMessage,
   urlSource,
@@ -21,6 +22,7 @@ import {
   variantLabel,
 } from "@repo/media";
 import type { MediaItem, MediaKind, StreamVariantPolicy } from "@repo/protocol";
+import { hlsOutputFilename, openHlsStream } from "@repo/streams";
 import {
   Badge,
   Button,
@@ -156,9 +158,7 @@ export function App() {
   const handleDownload = useCallback(async () => {
     if (busy || selected.length === 0) return;
 
-    const sources = selected.map((item) =>
-      urlSource(item.url, item.filename ?? `media-${item.id}`),
-    );
+    const sources = selected.map((item) => toDownloadSource(item, prefs.streamVariantPolicy));
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -173,11 +173,12 @@ export function App() {
       }
 
       // Barra 1: progresso do arquivo atual.
+      const segments = event.subTotal ? ` · ${event.subIndex ?? 0}/${event.subTotal} seg` : "";
       setDownloadJob({
         label: `Baixando ${event.filename}`,
         detail: `${formatBytes(event.loadedBytes)}${
           event.totalBytes ? ` / ${formatBytes(event.totalBytes)}` : ""
-        }`,
+        }${segments}`,
         percent: event.filePercent,
       });
 
@@ -217,7 +218,7 @@ export function App() {
       abortRef.current = null;
       setBusy(false);
     }
-  }, [busy, selected]);
+  }, [busy, selected, prefs.streamVariantPolicy]);
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
@@ -444,6 +445,27 @@ function ProgressRow({ label, job }: { label: string; job: ProgressState | null 
       </span>
     </div>
   );
+}
+
+/** Fonte do ZIP: converte HLS para MP4 quando possível, senão baixa direto. */
+function toDownloadSource(item: MediaItem, policy: StreamVariantPolicy): DownloadSource {
+  if (isConvertibleHls(item)) {
+    return {
+      filename: hlsOutputFilename(item),
+      open: (signal, onProgress) => openHlsStream({ url: item.url, policy, signal, onProgress }),
+    };
+  }
+
+  return urlSource(item.url, item.filename ?? `media-${item.id}`);
+}
+
+/** Só converte HLS VOD sem DRM; o resto cai no download direto. */
+function isConvertibleHls(item: MediaItem): boolean {
+  if (item.streamType !== "hls") return false;
+
+  const { stream } = item;
+  if (!stream) return true;
+  return !stream.live && stream.encryption !== "sample-aes";
 }
 
 /** Linha de metadados do item (streams mostram qualidade/duração/tamanho). */

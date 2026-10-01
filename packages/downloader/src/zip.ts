@@ -8,13 +8,24 @@ export type OpenedSource = {
   totalBytes?: number;
 };
 
+/** Progresso parcial reportado pela fonte durante `open()` (ex.: segmentos). */
+export type SourceProgress = {
+  totalBytes?: number;
+  /** Índice (0-based ou 1-based, conforme a fonte) do item interno atual. */
+  subIndex?: number;
+  subTotal?: number;
+};
+
 /**
  * Uma entrada do ZIP, aberta sob demanda. Arquivos comuns usam `urlSource`;
  * streams transmuxados (Fase B) retornam o MP4 gerado aqui.
  */
 export type DownloadSource = {
   filename: string;
-  open(signal?: AbortSignal): Promise<OpenedSource>;
+  open(
+    signal?: AbortSignal,
+    onProgress?: (progress: SourceProgress) => void,
+  ): Promise<OpenedSource>;
 };
 
 export type ZipProgressEvent = {
@@ -84,6 +95,13 @@ type ZipEntry = {
   input: ReadableStream<Uint8Array> | Uint8Array;
 };
 
+type ProgressState = {
+  loadedBytes: number;
+  totalBytes?: number;
+  subIndex?: number;
+  subTotal?: number;
+};
+
 async function* entries(sources: DownloadSource[], options: ZipOptions): AsyncGenerator<ZipEntry> {
   const used = new Set<string>();
   const total = sources.length;
@@ -93,54 +111,55 @@ async function* entries(sources: DownloadSource[], options: ZipOptions): AsyncGe
     if (!source) continue;
 
     const name = uniqueEntryName(used, source.filename);
-    options.onProgress?.({
-      phase: "downloading",
-      index,
-      total,
-      filename: name,
-      loadedBytes: 0,
-      filePercent: 0,
-      overallPercent: (index / total) * 100,
-    });
+    const state: ProgressState = { loadedBytes: 0 };
+
+    const report = (phase: ZipProgressEvent["phase"]): void => {
+      const fraction = state.subTotal
+        ? (state.subIndex ?? 0) / state.subTotal
+        : state.totalBytes
+          ? state.loadedBytes / state.totalBytes
+          : 0;
+      const done = phase === "done";
+
+      options.onProgress?.({
+        phase,
+        index,
+        total,
+        filename: name,
+        loadedBytes: state.loadedBytes,
+        totalBytes: state.totalBytes,
+        filePercent: done ? 100 : fraction * 100,
+        overallPercent: ((index + (done ? 1 : fraction)) / total) * 100,
+        subIndex: state.subIndex,
+        subTotal: state.subTotal,
+      });
+    };
+
+    report("downloading");
 
     try {
-      const opened = await source.open(options.signal);
-      const totalBytes = opened.totalBytes;
-      let loadedBytes = 0;
-      let input: ReadableStream<Uint8Array> | Uint8Array;
+      const opened = await source.open(options.signal, (progress) => {
+        if (progress.totalBytes !== undefined) state.totalBytes = progress.totalBytes;
+        if (progress.subIndex !== undefined) state.subIndex = progress.subIndex;
+        if (progress.subTotal !== undefined) state.subTotal = progress.subTotal;
+        report("downloading");
+      });
 
+      if (opened.totalBytes !== undefined) state.totalBytes = opened.totalBytes;
+
+      let input: ReadableStream<Uint8Array> | Uint8Array;
       if (opened.body instanceof Uint8Array) {
-        loadedBytes = opened.body.byteLength;
+        state.loadedBytes = opened.body.byteLength;
         input = opened.body;
       } else {
         input = countBytes(opened.body, (chunkBytes) => {
-          loadedBytes += chunkBytes;
-          const fraction = totalBytes ? loadedBytes / totalBytes : 0;
-          options.onProgress?.({
-            phase: "downloading",
-            index,
-            total,
-            filename: name,
-            loadedBytes,
-            totalBytes,
-            filePercent: fraction * 100,
-            overallPercent: ((index + fraction) / total) * 100,
-          });
+          state.loadedBytes += chunkBytes;
+          report("downloading");
         });
       }
 
       yield { name, input };
-
-      options.onProgress?.({
-        phase: "done",
-        index,
-        total,
-        filename: name,
-        loadedBytes,
-        totalBytes: totalBytes ?? loadedBytes,
-        filePercent: 100,
-        overallPercent: ((index + 1) / total) * 100,
-      });
+      report("done");
     } catch (error) {
       if (options.signal?.aborted) throw error;
       options.onProgress?.({

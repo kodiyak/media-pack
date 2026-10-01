@@ -81,4 +81,22 @@ describe("createZipStream", () => {
 
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: "error" }));
   });
+
+  it("repassa o progresso por segmento da fonte", async () => {
+    const events: ZipProgressEvent[] = [];
+    const source: DownloadSource = {
+      filename: "v.mp4",
+      async open(_signal, onProgress) {
+        onProgress?.({ subIndex: 1, subTotal: 2 });
+        onProgress?.({ subIndex: 2, subTotal: 2 });
+        return { body: encode("MP4") };
+      },
+    };
+
+    await readAll(createZipStream([source], { onProgress: (event) => events.push(event) }));
+
+    const mid = events.find((event) => event.subIndex === 1 && event.subTotal === 2);
+    expect(mid?.filePercent).toBe(50);
+    expect(events.at(-1)?.filePercent).toBe(100);
+  });
 });

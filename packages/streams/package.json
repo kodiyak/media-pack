@@ -18,7 +18,8 @@
     "@repo/media": "workspace:*",
     "@repo/protocol": "workspace:*",
     "fast-xml-parser": "catalog:",
-    "m3u8-parser": "catalog:"
+    "m3u8-parser": "catalog:",
+    "mux.js": "catalog:"
   },
   "devDependencies": {
     "@types/m3u8-parser": "catalog:",

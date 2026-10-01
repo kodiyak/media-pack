@@ -49,11 +49,13 @@ pnpm install
    A qualidade escolhida segue a preferência **“Qualidade do stream”** (padrão: melhor).
 4. O **side panel** lista as mídias em tempo real, com **filtro + auto-seleção por tipo** (mostra só
    os tipos marcados e já os marca), tamanho mínimo, seleção manual e busca.
-5. Ao clicar em **Baixar**, o download e a montagem do ZIP acontecem **juntos, em streaming** (um
-   arquivo por vez, gravando direto no disco). A UI mostra **duas barras**: **"Download"** (progresso
-   do vídeo atual) e **"ZIP"** (vídeos baixados ÷ total). Ao terminar, o progresso é **resetado** e um
-   **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para mídia, que já é
-   comprimida.
+5. Ao clicar em **Baixar**, download + montagem do ZIP + conversão acontecem **juntos, em streaming**
+   (um arquivo por vez, gravando direto no disco). **HLS** é convertido para **MP4** na hora (fMP4
+   concatenado / TS → `mux.js` / AES-128 via WebCrypto) e entra no ZIP; **DASH** e streams não
+   suportados (live/SAMPLE-AES) caem no download direto. A UI mostra **duas barras**: **"Download"**
+   (arquivo atual, com progresso por segmento) e **"ZIP"** (arquivos ÷ total). Ao terminar, o progresso
+   é **resetado** e um **toast** confirma. O `client-zip` faz `store` (sem compressão) — ideal para
+   mídia, que já é comprimida.
 
 ## Catalog do pnpm
 
@@ -88,20 +90,26 @@ Lógica pura (sem `chrome.*`), por isso 100% testável:
 
 ## `@repo/streams`
 
-Resolução de manifestos na **Fase A (etapa S1)** — sem baixar segmentos ainda:
+Resolução de manifestos (**S1**) e conversão **HLS → MP4** em streaming (**Fase B**):
 
-- `parseHlsManifest(text, baseUrl)` → variantes (master) ou container/criptografia/segmentos/live.
-- `parseDashManifest(xml, baseUrl)` → representações de vídeo, duração e live.
-- `resolveStreamInfo({ url, streamType }, { fetch? })` → `Partial<StreamInfo>` (S1).
-- Helpers: `resolveUrl`, `positiveInt`, `asArray`, `asString`, `estimateBytes`, `parseIsoDuration`.
-
-> A conversão **TS/fMP4 → MP4** com `mux.js` (e o download dos segmentos) entra na **Fase B**.
+- `resolveStreamInfo({ url, streamType }, { fetch? })` → `Partial<StreamInfo>` (variantes, duração,
+  container, criptografia, tamanho estimado).
+- `parseHlsManifest` / `parseDashManifest` → metadados.
+- `buildHlsPlan(text, baseUrl)` → plano de segmentos (URLs resolvidas, byte ranges, chave AES-128, init).
+- `openHlsStream({ url, policy, signal, onProgress }, { fetch?, createTransmuxer? })` → `{ body }`:
+  - **fMP4** (`EXT-X-MAP`) → concatena `init` + segmentos;
+  - **TS** → transmuxa com **mux.js** (`import()` dinâmico, code-split);
+  - **AES-128** → descriptografa cada segmento com WebCrypto.
+- `hlsOutputFilename(item)` → nome `.mp4`.
+- Limitações da fase: **VOD** apenas (live e SAMPLE-AES caem no download direto); **DASH** ainda é
+  baixado como `.mpd` (Fase C).
 
 ## `@repo/downloader`
 
 Baixa e zipa na **mesma esteira** (`client-zip` puxa uma fonte por vez, sem manter o conteúdo na
-RAM). Cada entrada é uma `DownloadSource` (`{ filename, open(signal) }`); `urlSource(url, filename)`
-é a fonte padrão. `createZipStream(sources, { onProgress, signal })` emite dois progressos por evento:
+RAM). Cada entrada é uma `DownloadSource` (`{ filename, open(signal, onProgress) }`);
+`urlSource(url, filename)` é a fonte padrão. `createZipStream(sources, { onProgress, signal })` emite
+dois progressos por evento:
 
 - `filePercent` → progresso do **arquivo atual** (barra "Download");
 - `overallPercent` → **arquivos baixados ÷ total** (barra "ZIP").
