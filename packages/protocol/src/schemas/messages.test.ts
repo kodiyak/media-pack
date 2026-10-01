@@ -1,42 +1,71 @@
 import { describe, expect, it } from "vitest";
-import { streamPrepareRequestSchema } from "./messages";
+import { downloadJobStateSchema, downloadStartRequestSchema } from "./messages";
 
-describe("streamPrepareRequestSchema", () => {
-  it("aceita um pedido DASH com plano serializável", () => {
-    const result = streamPrepareRequestSchema.safeParse({
-      type: "streams.prepare",
-      requestId: "00000000-0000-4000-8000-000000000001",
-      url: "https://cdn.test/video.mpd",
-      streamType: "dash",
+const ITEM = {
+  id: "00000000-0000-4000-8000-000000000001",
+  url: "https://cdn.test/clipe.mp4",
+  kind: "video" as const,
+  filename: "clipe.mp4",
+  sizeInBytes: 1024,
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+
+describe("downloadStartRequestSchema", () => {
+  it("aceita um pedido com itens serializáveis", () => {
+    const result = downloadStartRequestSchema.safeParse({
+      type: "downloads.start",
+      jobId: "00000000-0000-4000-8000-000000000002",
+      zipName: "media-pack.zip",
       policy: "best",
-      filename: "video.mp4",
-      track: {
-        container: "fmp4",
-        initUrl: "https://cdn.test/init.mp4",
-        segments: [
-          {
-            url: "https://cdn.test/segment.m4s",
-            byteRange: { offset: 0, length: 100 },
-          },
-        ],
-      },
+      items: [ITEM],
     });
 
     expect(result.success).toBe(true);
   });
 
-  it("rejeita plano com URL insegura", () => {
-    const result = streamPrepareRequestSchema.safeParse({
-      type: "streams.prepare",
-      requestId: "00000000-0000-4000-8000-000000000001",
-      url: "https://cdn.test/video.mpd",
-      streamType: "dash",
+  it("rejeita item com URL insegura", () => {
+    const result = downloadStartRequestSchema.safeParse({
+      type: "downloads.start",
+      jobId: "00000000-0000-4000-8000-000000000002",
+      zipName: "media-pack.zip",
       policy: "best",
-      filename: "video.mp4",
-      track: {
-        container: "fmp4",
-        segments: [{ url: "not-a-url" }],
-      },
+      items: [{ ...ITEM, url: "not-a-url" }],
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("downloadJobStateSchema", () => {
+  it("aceita um estado em andamento", () => {
+    const result = downloadJobStateSchema.safeParse({
+      jobId: "00000000-0000-4000-8000-000000000003",
+      status: "running",
+      zipName: "media-pack.zip",
+      total: 3,
+      index: 1,
+      filename: "clipe.mp4",
+      loadedBytes: 512,
+      filePercent: 50,
+      overallPercent: 33,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejeita percentual fora de 0–100", () => {
+    const result = downloadJobStateSchema.safeParse({
+      jobId: "00000000-0000-4000-8000-000000000003",
+      status: "running",
+      zipName: "media-pack.zip",
+      total: 3,
+      index: 1,
+      filename: "clipe.mp4",
+      loadedBytes: 512,
+      filePercent: 150,
+      overallPercent: 33,
+      updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
     expect(result.success).toBe(false);

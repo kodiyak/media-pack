@@ -1,12 +1,21 @@
-import { DEFAULT_MEDIA_PREFS, type MediaItem, type MediaPrefs } from "@repo/protocol";
+import {
+  DEFAULT_MEDIA_PREFS,
+  type DownloadJobState,
+  downloadJobStateSchema,
+  type MediaItem,
+  type MediaPrefs,
+} from "@repo/protocol";
 import { useCallback, useEffect, useState } from "react";
 import {
+  DOWNLOAD_KEY,
   hasExtensionApi,
+  readDownloadJob,
   readPrefs,
   readStoredMedia,
   subscribeToMedia,
   writePrefs,
 } from "./lib/chrome";
+import { subscribeToDownloadState } from "./lib/downloads";
 
 /** Mídias capturadas pelo service worker (via `chrome.storage.session`). */
 export function useCollectedMedia(): MediaItem[] {
@@ -86,4 +95,49 @@ export function useMediaPrefs(): [MediaPrefs, (patch: Partial<MediaPrefs>) => vo
   }, []);
 
   return [prefs, update];
+}
+
+/**
+ * Estado do job de download com reconexão: lê o snapshot persistido no storage
+ * e acompanha as atualizações ao vivo do offscreen. Assim fechar e reabrir o
+ * painel não perde o progresso (o download segue rodando no offscreen).
+ */
+export function useDownloadJob(): [
+  DownloadJobState | null,
+  (state: DownloadJobState | null) => void,
+] {
+  const [state, setState] = useState<DownloadJobState | null>(null);
+
+  useEffect(() => {
+    if (!hasExtensionApi()) return;
+
+    let active = true;
+    void readDownloadJob().then((stored) => {
+      if (active && stored) setState(stored);
+    });
+
+    const unsubscribe = subscribeToDownloadState((next) => {
+      if (active) setState(next);
+    });
+
+    const onChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      areaName: string,
+    ): void => {
+      if (areaName !== "session") return;
+      const change = changes[DOWNLOAD_KEY];
+      if (!change) return;
+      const parsed = downloadJobStateSchema.safeParse(change.newValue);
+      if (active) setState(parsed.success ? parsed.data : null);
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+
+    return () => {
+      active = false;
+      unsubscribe();
+      if (hasExtensionApi()) chrome.storage.onChanged.removeListener(onChanged);
+    };
+  }, []);
+
+  return [state, setState];
 }

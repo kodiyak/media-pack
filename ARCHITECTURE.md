@@ -108,13 +108,13 @@ orquestra três superfícies:
                          └──────┬───────────────┬────────┘
                      storage.session│        runtime.sendMessage
                                     │               │
-                        ┌───────────▼───┐      ┌────▼──────────────┐
-                        │  Side Panel    │      │  Offscreen doc     │
-                        │  (React/SPA)   │      │  (conversão pesada)│
-                        │  • lista/filtra│      │  • HLS/DASH → MP4  │
-                        │  • seleciona   │      │  • mux mp4box      │
-                        │  • dispara ZIP │      │  • OPFS staging    │
-                        └───────────────┘      └────────────────────┘
+                        ┌───────────▼───┐      ┌────▼──────────────────┐
+                        │  Side Panel   │      │  Offscreen doc         │
+                        │  (React/SPA)  │      │  (download persistente)│
+                        │  • lista/filtra│     │  • HLS/DASH → MP4      │
+                        │  • seleciona  │      │  • mux mp4box          │
+                        │  • dispara ZIP│      │  • ZIP + grava no disco│
+                        └───────────────┘      └────────────────────────┘
 ```
 
 ### Por que um Offscreen document?
@@ -122,8 +122,9 @@ orquestra três superfícies:
 O **Service Worker** do MV3 é suspenso a qualquer momento e **não tem acesso a
 `ReadableStream`/`Response` de forma confiável** para trabalho de rede longo.
 O **documento offscreen** (`offscreen.html`) é criado **somente quando o usuário
-inicia um download** (motivo `WORKERS`) e hospeda a conversão HLS/DASH + mux,
-mantendo o SW leve.
+inicia um download** (motivo `WORKERS`). Ele hospeda a conversão HLS/DASH + mux
+**e também a orquestração do ZIP**, o que mantém o SW leve e faz o download
+sobreviver ao fechamento do Side Panel.
 
 ```text
 SW (leve)                         Offscreen (pesado, sob demanda)
@@ -221,51 +222,57 @@ O objetivo central: **baixar N arquivos e compactar em um único ZIP sem estoura
 RAM**. A mídia já é comprimida, então o ZIP usa **client-zip em modo
 store-only** (sem recompressão).
 
-### Fluxo do clique em "Baixar"
+### Fluxo do clique em "Baixar" (persistente)
 
 ```text
- Usuário clica em "Baixar N (.zip)"
+ Usuário clica em "Baixar N (.zip)"        [Side Panel, dentro do gesto]
             │
-            ▼
- handleDownload()
+            ├─ 1. showSaveFilePicker()          ← gesto do usuário
+            │       └─ handle → IndexedDB (chave = jobId)
             │
-            ├─ 1. prepareZipSink(buildZipName())   ← dentro do gesto do usuário
-            │       │  showSaveFilePicker() (File System Access API)
-            │       │      └─ grava direto no disco (streaming)
-            │       └─ fallback: Blob + <a download> (navegador sem FS Access)
+            ├─ 2. runtime.sendMessage("downloads.start")
+            │       └─ { jobId, zipName, items[], policy }
             │
-            ├─ 2. buildSources(selected, policy, signal, onPrepared)
-            │       │  (resolve metadados/planos; NÃO baixa segmentos ainda)
-            │       │
-            │       ├─ HLS conversível  → lazyPreparedSource({streamType:hls, filename:*.mp4})
-            │       ├─ DASH             → resolveDashTracks(MPD) → video .mp4 + audio .m4a
-            │       └─ arquivo comum    → urlSource(url, filename)
+            ▼  Service Worker
+            ├─ ensureOffscreen()  (cria OU reaproveita um offscreen vivo)
+            └─ encaminha "downloads.start.offscreen"
             │
-            ├─ 3. sink.write(createZipStream(sources, {signal, onProgress}))
-            │       │  client-zip abre cada fonte sob demanda
-            │       │  cada stream converte → OPFS → lê do OPFS → entra no ZIP
-            │
-            └─ 4. finally:
-                   closeOffscreenDocument()
-                   deleteOpfsFile() para cada temp preparado
+            ▼  Offscreen document   ← o download roda AQUI (sobrevive ao painel)
+            ├─ cleanupOpfs()
+            ├─ buildDownloadSources(items, policy, signal)
+            ├─ createSink():
+            │     ├─ handle do IndexedDB → createWritable() → grava DIRETO no disco
+            │     └─ fallback: ZIP no OPFS (status "ready")
+            └─ createZipStream(sources) → sink.write(...)   (store-only)
+                 │
+                 └─ emite "downloads.state" a cada progresso
+                       ├─ Service Worker: persiste em storage.session["downloadJob"]
+                       └─ Side Panel: atualiza as duas barras ao vivo
+
+ Fechar o painel no meio? O offscreen continua baixando.
+ Reabrir? Lê o snapshot de storage.session → reconecta no progresso.
 ```
+
+> **Persistência:** o *writer* (ZIP) e o *producer* (conversão) vivem no offscreen,
+> não no painel. O `FileSystemFileHandle` viaja pelo **IndexedDB** (mesma origem da
+> extensão). Se o offscreen não conseguir usá-lo, o ZIP é montado no OPFS e o painel
+> mostra **"Salvar ZIP"**.
 
 ### Pipeline de streaming
 
 ```text
- DownloadSource.open()
+ DownloadSource.open()                       (construído no offscreen)
       │
-      ├─ urlSource          ──▶ fetch(url) ──▶ Response.body (stream direto)
-      │
-      └─ lazyPreparedSource ──▶ prepareStreamFile() ──▶ OPFS temp
-                                      │                     │
-                                      └─────────────────────┴─▶ opfsSource()
-                                                                     │
-                                                                     ▼
-                                              createZipStream() → makeZip (store-only)
-                                                                     │
-                                                                     ▼
-                                                    sink.write() → pipeTo(disco)
+      ├─ HLS conversível ──▶ openHlsStream()  ──▶ body fMP4 (+ mux mp4box)
+      ├─ DASH            ──▶ openDashTrack()  ──▶ body fMP4
+      └─ arquivo comum   ──▶ urlSource()      ──▶ fetch(url) → Response.body
+                                     │
+                                     ▼
+                     createZipStream() → makeZip (store-only)
+                                     │
+                                     ▼
+              sinkFromFileHandle() → pipeTo(writable)   → disco
+              (fallback: writeOpfsFile → storage.session["downloadJob"])
 ```
 
 Nada fica inteiro em memória: cada fonte é aberta, lida e descartada na ordem do
@@ -362,49 +369,65 @@ Regras do mux (`@repo/streams/src/mux/mp4box.ts`):
 DASH entrega **dois arquivos** (vídeo `.mp4` + áudio `.m4a`), diferente do HLS que
 agora entrega **um único `.mp4`** quando muxa.
 
-### Offscreen: ciclo de vida de uma conversão
+### Offscreen: ciclo de vida de um download
 
 ```text
- Offscreen recebe streams.prepare.offscreen
+ Offscreen recebe downloads.start.offscreen
       │
       ├─ cleanupOpfs()                    (oportunista, ver Contexto 6)
-      ├─ createOpfsFileName(extensão)
-      ├─ openSource(request):
-      │    hls → openHlsStream(url, policy, signal, onProgress)
-      │    dash → openDashTrack(preparedTrackPlan, …)
-      ├─ writeOpfsFile(name, body, signal)
+      ├─ buildDownloadSources(items, policy, signal)
+      ├─ createSink(): handle do IndexedDB  OU  OPFS (fallback)
+      ├─ createZipStream(sources) → sink.write(...)
       │
-      └─ responde streams.result { ok, file{name, filename, sizeBytes} }
+      └─ emite downloads.state { status, filePercent, overallPercent, … }
+           running → done | ready | error | cancelled
 ```
 
-Cancelamento: `streams.cancel.offscreen` → `AbortController` do job ativo.
+Cancelamento: `downloads.cancel.offscreen` → `AbortController` do job ativo.
 
 ---
 
 ## Contexto 6 — Persistência
 
-Duas camadas, com propósitos distintos:
+Três camadas, com propósitos distintos:
 
 ```text
- chrome.storage.session            OPFS (Origin Private File System)
- ──────────────────────            ─────────────────────────────────
- • itens capturados ("media")      • temporários de conversão
- • metadados enriquecidos (S1)     • diretório "media-pack-cache"
- • some ao fechar o navegador      • privado por origem, persistente
- • máx. 2000 itens                 • lido/apagado durante o ZIP
+ chrome.storage.session           IndexedDB              OPFS
+ ──────────────────────           ─────────              ────
+ • itens capturados ("media")     • FileSystemFileHandle • ZIP temporário
+ • metadados enriquecidos (S1)      do arquivo escolhido   (fallback "ready")
+ • estado do download             • chave = jobId        • dir "media-pack-cache"
+ • some ao fechar o navegador     • some ao apagar       • persiste até limpar
+ • máx. 2000 itens
 ```
 
-### OPFS — staging de streams
+### Estado do download (reconexão do painel)
 
 ```text
- prepara stream (offscreen)
-      │ writeOpfsFile(name, body)
-      ▼
- /media-pack-cache/<timestamp>-<rand>.mp4
-      │
-      ├─ opfsSource(name) lê durante o ZIP
-      ├─ deleteOpfsFile(name) após a entrada entrar no ZIP (App.tsx finally)
-      └─ cleanupOpfs() limpeza oportunista no início da conversão
+ service worker                    side panel (ao reabrir)
+ ──────────────                    ────────────────────────
+ downloads.state (offscreen)       lê storage.session["downloadJob"]
+      │ throttle 300ms              │
+      ▼                             ▼
+ storage.session["downloadJob"]    remonta as duas barras (running)
+   { status, filePercent,          ou o botão "Salvar ZIP" (ready)
+     overallPercent, stagedName? }
+```
+
+Estados: `running` → `done` (gravou no disco) | `ready` (ZIP no OPFS) | `error` | `cancelled`.
+Ao chegar num estado terminal, o service worker fecha o offscreen.
+
+### Handles e staging
+
+```text
+ FileSystemFileHandle                     OPFS (/media-pack-cache)
+ ────────────────────                     ────────────────────────
+ painel: showSaveFilePicker()             fallback quando o handle não serve
+      │ structured clone                   │ writeOpfsFile("<job>.zip")
+      ▼                                     ▼
+ IndexedDB "handles" (chave jobId) ──▶ offscreen: createWritable() → disco
+                                              │
+                            "Salvar ZIP" → opfsSource() → disco → delete
 ```
 
 Política de limpeza (`DEFAULT_OPFS_POLICY`):
@@ -488,10 +511,12 @@ next-themes**):
 | `chrome.storage.session` para itens | Sessão efêmera, sem lixo permanente |
 | client-zip store-only | Mídia já comprimida; evita recompressão |
 | ZIP em streaming + File System Access | Não estoura RAM em downloads grandes |
-| Offscreen document sob demanda | SW é suspenso e não faz trabalho de rede longo |
-| OPFS como staging | Streams convertidos não pesam na RAM do side panel |
+| Offscreen document sob demanda | SW é suspenso; o download precisa de contexto vivo |
+| Download orquestrado no offscreen | Fechar o side panel não interrompe o ZIP |
+| Estado do job em `storage.session` | Painel se reconecta ao progresso ao reabrir |
+| Handle do arquivo via IndexedDB | Painel escolhe (gesto), offscreen grava (persistência) |
+| OPFS como fallback do ZIP | Funciona sem File System Access/permissão válida |
 | Handshake `streams.ready` | Evita mensagem perdida antes do listener do offscreen |
-| Protocolo `streams.result` explícito | Sem depender de `sendResponse` SW→offscreen |
 | master HLS vence rendições | Evita downloads "lixo" de variantes/áudio/legenda |
 | mp4box lazy + limite 512 MiB + fallback | Junta áudio demuxado sem risco de travar o ZIP |
 
@@ -505,12 +530,13 @@ next-themes**):
  Fase C  DASH → MP4 ............................. ✅
  Fase D  Offscreen + OPFS + lazy conversion ...... ✅
  Fase E  Mux mp4box (áudio separado HLS) ......... ✅
+ Fase F  Download persistente (offscreen + IDB) .. ✅
    └─ futuro: mux DASH em um único MP4
    └─ futuro: áudio não-AAC (fallback/transcode)
    └─ futuro: suporte a LIVE (se viável)
 ```
 
 > **Como navegar no código:** comece por `apps/ext/src/background/index.ts`
-> (detecção/orquestração), depois `apps/ext/src/sidepanel/App.tsx` (fluxo de
-> download) e `apps/ext/src/offscreen/main.ts` (conversão). Os pacotes
+> (detecção/roteamento), depois `apps/ext/src/offscreen/downloads.ts` (download
+> persistente + ZIP) e `apps/ext/src/sidepanel/App.tsx` (UI). Os pacotes
 > `@repo/*` são bibliotecas puras, testáveis em Node, sem acoplamento ao Chrome.

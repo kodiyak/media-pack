@@ -1,4 +1,6 @@
 import {
+  type DownloadJobState,
+  downloadJobStateSchema,
   type MediaItem,
   type MediaPrefs,
   mediaItemSchema,
@@ -8,6 +10,7 @@ import {
 
 export const MEDIA_KEY = "media";
 export const PREFS_KEY = "prefs";
+export const DOWNLOAD_KEY = "downloadJob";
 
 const mediaListSchema = z.array(mediaItemSchema);
 
@@ -58,4 +61,17 @@ export async function readPrefs(): Promise<MediaPrefs | null> {
 export async function writePrefs(prefs: MediaPrefs): Promise<void> {
   if (!hasExtensionApi()) return;
   await chrome.storage.local.set({ [PREFS_KEY]: prefs });
+}
+
+/** Último estado conhecido do download (persistido pelo service worker). */
+export async function readDownloadJob(): Promise<DownloadJobState | null> {
+  if (!hasExtensionApi()) return null;
+  const stored = await chrome.storage.session.get(DOWNLOAD_KEY);
+  const parsed = downloadJobStateSchema.safeParse(stored[DOWNLOAD_KEY]);
+  return parsed.success ? parsed.data : null;
+}
+
+export async function clearDownloadJob(): Promise<void> {
+  if (!hasExtensionApi()) return;
+  await chrome.storage.session.remove(DOWNLOAD_KEY);
 }

@@ -1,15 +1,4 @@
-import {
-  buildZipName,
-  canUseFileSystemAccess,
-  createZipStream,
-  type DownloadSource,
-  deleteOpfsFile,
-  opfsSource,
-  prepareZipSink,
-  toErrorMessage,
-  urlSource,
-  type ZipProgressEvent,
-} from "@repo/downloader";
+import { buildZipName, canUseFileSystemAccess, toErrorMessage } from "@repo/downloader";
 import {
   formatBytes,
   formatDuration,
@@ -23,13 +12,7 @@ import {
   shouldAutoSelect,
   variantLabel,
 } from "@repo/media";
-import type { MediaItem, MediaKind, PreparedTrackPlan, StreamVariantPolicy } from "@repo/protocol";
-import {
-  hlsOutputFilename,
-  resolveDashTracks,
-  streamBaseName,
-  type TrackPlan,
-} from "@repo/streams";
+import type { MediaItem, MediaKind, StreamVariantPolicy } from "@repo/protocol";
 import {
   Badge,
   Button,
@@ -61,10 +44,23 @@ import {
   Trash2,
   Video,
 } from "lucide-react";
-import { type ComponentType, useCallback, useId, useMemo, useRef, useState } from "react";
-import { useCollectedMedia, useCurrentTabId, useMediaPrefs } from "./hooks";
-import { clearStoredMedia } from "./lib/chrome";
-import { closeOffscreenDocument, prepareStreamFile } from "./lib/offscreen";
+import {
+  type ComponentType,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useCollectedMedia, useCurrentTabId, useDownloadJob, useMediaPrefs } from "./hooks";
+import { clearDownloadJob, clearStoredMedia } from "./lib/chrome";
+import {
+  cancelDownload,
+  pickAndStoreFileHandle,
+  saveStagedZip,
+  startDownload,
+} from "./lib/downloads";
 
 const KIND_ICONS: Record<MediaKind, ComponentType<{ className?: string }>> = {
   video: Video,
@@ -88,12 +84,6 @@ const STREAM_QUALITY_OPTIONS: { label: string; value: StreamVariantPolicy }[] = 
   { label: "Menor", value: "smallest" },
 ];
 
-type ProgressState = {
-  label: string;
-  detail: string;
-  percent: number;
-};
-
 export function App() {
   const media = useCollectedMedia();
   const currentTabId = useCurrentTabId();
@@ -101,12 +91,33 @@ export function App() {
 
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
-  const [downloadJob, setDownloadJob] = useState<ProgressState | null>(null);
-  const [zipJob, setZipJob] = useState<ProgressState | null>(null);
+  const [job, setJob] = useDownloadJob();
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const handledJobRef = useRef<string | null>(null);
   const searchId = useId();
+
+  const busy = starting || job?.status === "running";
+
+  useEffect(() => {
+    if (!job) return;
+    const key = `${job.jobId}:${job.status}`;
+    if (handledJobRef.current === key) return;
+
+    if (job.status === "done") {
+      handledJobRef.current = key;
+      setError(null);
+      toast.success("ZIP salvo", { description: job.zipName });
+    } else if (job.status === "error") {
+      handledJobRef.current = key;
+      const message = job.error ?? "Falha no download.";
+      setError(message);
+      toast.error("Falha no download", { description: message });
+    } else if (job.status === "cancelled") {
+      handledJobRef.current = key;
+      toast.info("Download cancelado");
+    }
+  }, [job]);
 
   const visible = useMemo(
     () =>
@@ -158,86 +169,76 @@ export function App() {
   const handleClear = useCallback(() => {
     void clearStoredMedia();
     setOverrides({});
-    setDownloadJob(null);
-    setZipJob(null);
     setError(null);
   }, []);
 
   const handleDownload = useCallback(async () => {
     if (busy || selected.length === 0) return;
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setBusy(true);
+    const jobId = crypto.randomUUID();
+    const zipName = buildZipName();
+    setStarting(true);
     setError(null);
-    setDownloadJob({ label: "Preparando…", detail: "", percent: 0 });
-    setZipJob({ label: "Preparando…", detail: "", percent: 0 });
-
-    const onProgress = (event: ZipProgressEvent) => {
-      if (event.phase === "error") {
-        setError(`Falhou: ${event.filename} (${event.error})`);
-      }
-
-      // Barra 1: progresso do arquivo atual.
-      const segments = event.subTotal ? ` · ${event.subIndex ?? 0}/${event.subTotal} seg` : "";
-      setDownloadJob({
-        label: `Baixando ${event.filename}`,
-        detail: `${formatBytes(event.loadedBytes)}${
-          event.totalBytes ? ` / ${formatBytes(event.totalBytes)}` : ""
-        }${segments}`,
-        percent: event.filePercent,
-      });
-
-      // Barra 2: vídeos baixados comparados ao total.
-      setZipJob({
-        label: "Baixando vídeos…",
-        detail: `${Math.min(event.index + 1, event.total)}/${event.total}`,
-        percent: event.overallPercent,
-      });
-    };
-
-    type Sink = Awaited<ReturnType<typeof prepareZipSink>>;
-    let sink: Sink | null = null;
-    const preparedNames = new Set<string>();
 
     try {
-      // O seletor de arquivo precisa acontecer dentro do gesto do usuário.
-      sink = await prepareZipSink(buildZipName());
+      // O seletor de arquivo precisa acontecer dentro do gesto do usuário; o handle
+      // vai para o IndexedDB para o offscreen gravar mesmo se o painel fechar.
+      if (canUseFileSystemAccess()) {
+        await pickAndStoreFileHandle(jobId, zipName);
+      }
 
-      // Resolve apenas metadados/planos depois do clique; os segmentos só são processados
-      // quando a entrada correspondente do ZIP for aberta.
-      const sources = await buildSources(
-        selected,
-        prefs.streamVariantPolicy,
-        controller.signal,
-        (name) => preparedNames.add(name),
-      );
-      setZipJob({ label: "Baixando…", detail: `0/${sources.length}`, percent: 0 });
+      const response = await startDownload({
+        jobId,
+        zipName,
+        items: selected,
+        policy: prefs.streamVariantPolicy,
+      });
+      if (!response.ok) throw new Error(response.error ?? "Falha ao iniciar o download.");
 
-      await sink.write(createZipStream(sources, { signal: controller.signal, onProgress }));
-
-      toast.success("ZIP salvo", { description: sink.name });
-
-      // Finalizado: reseta o progresso.
-      setDownloadJob(null);
-      setZipJob(null);
+      setJob({
+        jobId,
+        status: "running",
+        zipName,
+        total: selected.length,
+        index: 0,
+        filename: "",
+        loadedBytes: 0,
+        filePercent: 0,
+        overallPercent: 0,
+        updatedAt: new Date().toISOString(),
+      });
     } catch (cause) {
-      if (controller.signal.aborted) {
-        await sink?.abort();
-        toast.info("Download cancelado");
-        setDownloadJob(null);
-        setZipJob(null);
-      } else {
-        setError(toErrorMessage(cause));
-        toast.error("Falha no download", { description: toErrorMessage(cause) });
+      if (!isAbortError(cause)) {
+        const message = toErrorMessage(cause);
+        setError(message);
+        toast.error("Falha no download", { description: message });
       }
     } finally {
-      closeOffscreenDocument();
-      await Promise.all([...preparedNames].map((name) => deleteOpfsFile(name).catch(() => {})));
-      abortRef.current = null;
-      setBusy(false);
+      setStarting(false);
     }
-  }, [busy, selected, prefs.streamVariantPolicy]);
+  }, [busy, selected, prefs.streamVariantPolicy, setJob]);
+
+  const handleCancel = useCallback(() => {
+    if (job) cancelDownload(job.jobId);
+  }, [job]);
+
+  const handleSaveStaged = useCallback(async () => {
+    if (job?.status !== "ready" || !job.stagedName) return;
+
+    try {
+      const name = await saveStagedZip(job.stagedName, job.zipName);
+      toast.success("ZIP salvo", { description: name });
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        const message = toErrorMessage(cause);
+        setError(message);
+        toast.error("Falha ao salvar", { description: message });
+      }
+    } finally {
+      void clearDownloadJob();
+      setJob(null);
+    }
+  }, [job, setJob]);
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
@@ -410,10 +411,33 @@ export function App() {
       </section>
 
       <footer className="sticky bottom-0 flex flex-col gap-2 border-t bg-background p-4">
-        {downloadJob || zipJob ? (
+        {job?.status === "running" ? (
           <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
-            <ProgressRow label="Download" job={downloadJob} />
-            <ProgressRow label="ZIP" job={zipJob} />
+            <ProgressRow
+              label="Download"
+              percent={job.filePercent}
+              title={`Baixando ${job.filename || "…"}`}
+              detail={`${formatBytes(job.loadedBytes)}${
+                job.totalBytes ? ` / ${formatBytes(job.totalBytes)}` : ""
+              }${job.subTotal ? ` · ${job.subIndex ?? 0}/${job.subTotal} seg` : ""}`}
+            />
+            <ProgressRow
+              label="ZIP"
+              percent={job.overallPercent}
+              title="Baixando vídeos…"
+              detail={`${Math.min(job.index + 1, job.total)}/${job.total}`}
+            />
+          </div>
+        ) : null}
+
+        {job?.status === "ready" ? (
+          <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
+            <span className="text-xs text-muted-foreground">
+              ZIP pronto ({job.zipName}). Escolha onde salvar.
+            </span>
+            <Button size="sm" onClick={() => void handleSaveStaged()}>
+              Salvar ZIP
+            </Button>
           </div>
         ) : null}
 
@@ -433,7 +457,7 @@ export function App() {
             {busy ? "Processando…" : `Baixar ${selected.length} (.zip)`}
           </Button>
           {busy ? (
-            <Button variant="outline" onClick={() => abortRef.current?.abort()}>
+            <Button variant="outline" onClick={handleCancel}>
               Cancelar
             </Button>
           ) : null}
@@ -451,141 +475,33 @@ export function App() {
   );
 }
 
-function ProgressRow({ label, job }: { label: string; job: ProgressState | null }) {
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function ProgressRow({
+  label,
+  percent,
+  detail,
+  title,
+}: {
+  label: string;
+  percent: number;
+  detail: string;
+  title: string;
+}) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="font-medium">{label}</span>
-        <span className="text-muted-foreground">{Math.round(job?.percent ?? 0)}%</span>
+        <span className="text-muted-foreground">{Math.round(percent)}%</span>
       </div>
-      <Progress value={job?.percent ?? 0} />
+      <Progress value={percent} />
       <span className="truncate text-xs text-muted-foreground">
-        {job ? `${job.label} · ${job.detail}` : "Aguardando…"}
+        {title} · {detail}
       </span>
     </div>
   );
-}
-
-/**
- * Monta as fontes do ZIP sem converter nada antecipadamente.
- * Cada stream só cria um arquivo temporário no OPFS quando o ZIP abrir sua entrada.
- */
-async function buildSources(
-  items: MediaItem[],
-  policy: StreamVariantPolicy,
-  signal: AbortSignal,
-  onPrepared: (name: string) => void,
-): Promise<DownloadSource[]> {
-  const sources: DownloadSource[] = [];
-
-  for (const item of items) {
-    if (isConvertibleHls(item)) {
-      sources.push(
-        lazyPreparedSource(
-          {
-            url: item.url,
-            streamType: "hls",
-            policy,
-            filename: hlsOutputFilename(item),
-          },
-          onPrepared,
-        ),
-      );
-      continue;
-    }
-
-    if (item.streamType === "dash") {
-      sources.push(...(await buildDashSources(item, policy, signal, onPrepared)));
-      continue;
-    }
-
-    sources.push(urlSource(item.url, item.filename ?? `media-${item.id}`));
-  }
-
-  return sources;
-}
-
-async function buildDashSources(
-  item: MediaItem,
-  policy: StreamVariantPolicy,
-  signal: AbortSignal,
-  onPrepared: (name: string) => void,
-): Promise<DownloadSource[]> {
-  const base = streamBaseName(item);
-
-  try {
-    // Isto baixa somente o MPD para descobrir se haverá vídeo e áudio. Os segmentos
-    // ficam adiados até o client-zip abrir cada uma das entradas.
-    const { tracks } = await resolveDashTracks({ url: item.url, policy, signal });
-    return tracks.map((track) => {
-      const filename = track.kind === "video" ? `${base}.mp4` : `${base}.audio.m4a`;
-      return lazyPreparedSource(
-        {
-          url: item.url,
-          streamType: "dash",
-          policy,
-          filename,
-          track: toPreparedTrackPlan(track.plan),
-        },
-        onPrepared,
-      );
-    });
-  } catch (error) {
-    const message = toErrorMessage(error);
-    return [
-      {
-        filename: `${base}.mp4`,
-        open: async () => {
-          throw new Error(message);
-        },
-      },
-    ];
-  }
-}
-
-function lazyPreparedSource(
-  input: {
-    url: string;
-    streamType: "hls" | "dash";
-    policy: StreamVariantPolicy;
-    filename: string;
-    track?: PreparedTrackPlan;
-  },
-  onPrepared: (name: string) => void,
-): DownloadSource {
-  return {
-    filename: input.filename,
-    async open(signal, onProgress) {
-      const activeSignal = signal ?? new AbortController().signal;
-      const prepared = await prepareStreamFile(input, activeSignal, onProgress);
-      onPrepared(prepared.name);
-
-      try {
-        return await opfsSource(prepared.name, input.filename).open(activeSignal, onProgress);
-      } catch (error) {
-        await deleteOpfsFile(prepared.name).catch(() => {});
-        throw error;
-      }
-    },
-  };
-}
-
-function toPreparedTrackPlan(track: TrackPlan): PreparedTrackPlan {
-  return {
-    container: track.container,
-    initUrl: track.initUrl,
-    singleUrl: track.singleUrl,
-    segments: track.segments.map(({ url, byteRange }) => ({ url, byteRange })),
-  };
-}
-
-/** Só converte HLS VOD sem DRM; o resto cai no download direto. */
-function isConvertibleHls(item: MediaItem): boolean {
-  if (item.streamType !== "hls") return false;
-
-  const { stream } = item;
-  if (!stream) return true;
-  return !stream.live && stream.encryption !== "sample-aes";
 }
 
 /** Linha de metadados do item (streams mostram qualidade/duração/tamanho). */

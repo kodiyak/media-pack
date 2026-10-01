@@ -19,11 +19,16 @@ function makeItem(partial: Partial<MediaItem>): MediaItem {
 
 function stubChrome(media: MediaItem[]) {
   vi.stubGlobal("chrome", {
-    runtime: { id: "test-extension" },
+    runtime: {
+      id: "test-extension",
+      sendMessage: vi.fn(async () => ({ ok: true })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
     storage: {
       session: {
         get: vi.fn(async () => ({ media })),
         set: vi.fn(async () => {}),
+        remove: vi.fn(async () => {}),
       },
       local: {
         get: vi.fn(async () => ({})),

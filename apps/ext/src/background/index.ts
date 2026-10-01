@@ -1,23 +1,31 @@
 import { type ClassifyInput, classifyResponse, parseContentRangeTotal } from "@repo/media";
 import {
   type ClassifiedMedia,
+  type DownloadJobState,
+  type DownloadStartRequest,
+  downloadCancelRequestSchema,
+  downloadStartRequestSchema,
+  downloadStateMessageSchema,
   type MediaItem,
   mediaItemSchema,
   offscreenCloseMessageSchema,
   offscreenReadyMessageSchema,
-  type StreamCancelRequest,
-  type StreamPrepareRequest,
-  streamCancelRequestSchema,
-  streamPrepareRequestSchema,
-  streamPrepareResultMessageSchema,
   z,
 } from "@repo/protocol";
 import { resolveStreamInfo } from "@repo/streams";
 
 const MEDIA_KEY = "media";
+const DOWNLOAD_KEY = "downloadJob";
 const MAX_ITEMS = 2000;
 
 const mediaListSchema = z.array(mediaItemSchema);
+
+const TERMINAL_DOWNLOAD_STATUS = new Set<DownloadJobState["status"]>([
+  "ready",
+  "done",
+  "error",
+  "cancelled",
+]);
 
 /** URLs de rendições (variantes/áudio/legenda) já cobertas por uma master playlist. */
 const knownRenditionUrls = new Set<string>();
@@ -36,19 +44,24 @@ type OffscreenApi = {
 const offscreenApi = (chrome as unknown as { offscreen?: OffscreenApi }).offscreen;
 let offscreenReady = false;
 let resolveOffscreenReady: (() => void) | null = null;
-const pendingPrepares = new Map<
-  string,
-  { resolve: (value: unknown) => void; reject: (error: unknown) => void }
->();
+
+// Estado do download guardado no service worker para o side panel se reconectar
+// depois de ser fechado e reaberto.
+let latestDownload: DownloadJobState | null = null;
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
- * Cria o documento offscreen somente quando o usuário inicia um download.
- * Aguarda o handshake `streams.ready` para nunca mandar mensagem antes de
- * o listener do offscreen estar registrado.
+ * Garante um documento offscreen pronto. Se ele já existir (ex.: o service
+ * worker reiniciou), reaproveita — recriar mataria um download em andamento.
  */
 async function ensureOffscreen(): Promise<void> {
   if (offscreenReady) return;
   if (!offscreenApi) throw new Error("A API offscreen não está disponível.");
+
+  if (await hasOffscreenDocument()) {
+    offscreenReady = true;
+    return;
+  }
 
   const ready = new Promise<void>((resolve) => {
     resolveOffscreenReady = resolve;
@@ -59,7 +72,7 @@ async function ensureOffscreen(): Promise<void> {
   await offscreenApi.createDocument({
     url: "offscreen.html",
     reasons: ["WORKERS"],
-    justification: "Converter streams somente durante um download iniciado pelo usuário.",
+    justification: "Converter e baixar streams durante um download iniciado pelo usuário.",
   });
 
   await withTimeout(ready, 8_000, "O conversor offscreen não iniciou.");
@@ -67,37 +80,58 @@ async function ensureOffscreen(): Promise<void> {
   resolveOffscreenReady = null;
 }
 
+async function hasOffscreenDocument(): Promise<boolean> {
+  const getContexts = (
+    chrome.runtime as unknown as {
+      getContexts?: (filter: { contextTypes?: string[] }) => Promise<unknown[]>;
+    }
+  ).getContexts;
+  if (typeof getContexts !== "function") return false;
+
+  try {
+    const contexts = await getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    return contexts.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function closeOffscreen(): Promise<void> {
-  if (!offscreenReady || !offscreenApi) return;
+  if (!offscreenApi) return;
   offscreenReady = false;
   await offscreenApi.closeDocument().catch(() => {});
 }
 
-async function forwardStreamPrepare(request: StreamPrepareRequest): Promise<unknown> {
-  await ensureOffscreen();
+/** Persiste o estado (com throttle) e fecha o offscreen quando o job termina. */
+function persistDownloadState(state: DownloadJobState): void {
+  latestDownload = state;
 
-  const result = new Promise<unknown>((resolve, reject) => {
-    pendingPrepares.set(request.requestId, { resolve, reject });
-  });
-
-  try {
-    sendWithoutResponse({
-      ...request,
-      type: "streams.prepare.offscreen",
-    });
-    return await withTimeout(result, 10 * 60 * 1000, "Tempo limite da conversão offscreen.");
-  } finally {
-    // Mantém o offscreen vivo para as próximas entradas do mesmo download.
-    pendingPrepares.delete(request.requestId);
+  if (TERMINAL_DOWNLOAD_STATUS.has(state.status)) {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = undefined;
+    }
+    void chrome.storage.session.set({ [DOWNLOAD_KEY]: state });
+    void closeOffscreen();
+    return;
   }
+
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    void chrome.storage.session.set({ [DOWNLOAD_KEY]: latestDownload });
+  }, 300);
 }
 
-async function forwardStreamCancel(request: StreamCancelRequest): Promise<unknown> {
-  if (!offscreenReady) return { ok: true };
-  sendWithoutResponse({
-    ...request,
-    type: "streams.cancel.offscreen",
-  });
+async function startDownload(request: DownloadStartRequest): Promise<{ ok: true }> {
+  await ensureOffscreen();
+  sendWithoutResponse({ ...request, type: "downloads.start.offscreen" });
+  return { ok: true };
+}
+
+async function cancelDownload(jobId: string): Promise<{ ok: true }> {
+  await ensureOffscreen().catch(() => {});
+  sendWithoutResponse({ type: "downloads.cancel.offscreen", jobId });
   return { ok: true };
 }
 
@@ -105,6 +139,10 @@ function sendWithoutResponse(message: unknown): void {
   chrome.runtime.sendMessage(message, () => {
     void chrome.runtime.lastError;
   });
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function withTimeout<T>(
@@ -137,29 +175,23 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
 
-  const result = streamPrepareResultMessageSchema.safeParse(message);
-  if (result.success) {
-    pendingPrepares.get(result.data.requestId)?.resolve(result.data);
+  const state = downloadStateMessageSchema.safeParse(message);
+  if (state.success) {
+    persistDownloadState(state.data.state);
     return false;
   }
 
-  const prepare = streamPrepareRequestSchema.safeParse(message);
-  if (prepare.success) {
-    void forwardStreamPrepare(prepare.data)
+  const start = downloadStartRequestSchema.safeParse(message);
+  if (start.success) {
+    void startDownload(start.data)
       .then(sendResponse)
-      .catch((error: unknown) =>
-        sendResponse({
-          requestId: prepare.data.requestId,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
+      .catch((error: unknown) => sendResponse({ ok: false, error: toErrorMessage(error) }));
     return true;
   }
 
-  const cancel = streamCancelRequestSchema.safeParse(message);
+  const cancel = downloadCancelRequestSchema.safeParse(message);
   if (cancel.success) {
-    void forwardStreamCancel(cancel.data)
+    void cancelDownload(cancel.data.jobId)
       .then(sendResponse)
       .catch(() => sendResponse({ ok: true }));
     return true;

@@ -1,89 +1,77 @@
 import { z } from "../zod";
-import { streamContainerSchema, streamTypeSchema, streamVariantPolicySchema } from "./media";
+import { mediaItemSchema, streamVariantPolicySchema } from "./media";
 
-/** Plano DASH serializável enviado ao documento offscreen. */
-export const preparedTrackPlanSchema = z.object({
-  container: streamContainerSchema,
-  segments: z.array(
-    z.object({
-      url: z.url(),
-      byteRange: z
-        .object({
-          offset: z.number().int().nonnegative(),
-          length: z.number().int().positive(),
-        })
-        .optional(),
-    }),
-  ),
-  initUrl: z.url().optional(),
-  singleUrl: z.url().optional(),
-});
-export type PreparedTrackPlan = z.infer<typeof preparedTrackPlanSchema>;
-
-/** Solicita a conversão de uma única entrada, somente após o clique em Baixar. */
-export const streamPrepareRequestSchema = z.object({
-  type: z.literal("streams.prepare"),
-  requestId: z.uuid(),
-  url: z.url(),
-  streamType: streamTypeSchema,
-  policy: streamVariantPolicySchema,
-  filename: z.string().min(1),
-  track: preparedTrackPlanSchema.optional(),
-});
-export type StreamPrepareRequest = z.infer<typeof streamPrepareRequestSchema>;
-
-/** Variante interna, aceita apenas pelo documento offscreen. */
-export const streamPrepareOffscreenRequestSchema = streamPrepareRequestSchema.extend({
-  type: z.literal("streams.prepare.offscreen"),
-});
-export type StreamPrepareOffscreenRequest = z.infer<typeof streamPrepareOffscreenRequestSchema>;
-
-/** Cancela a conversão ativa no offscreen. */
-export const streamCancelRequestSchema = z.object({
-  type: z.literal("streams.cancel"),
-  requestId: z.uuid(),
-});
-export type StreamCancelRequest = z.infer<typeof streamCancelRequestSchema>;
-
-export const streamCancelOffscreenRequestSchema = streamCancelRequestSchema.extend({
-  type: z.literal("streams.cancel.offscreen"),
-});
-export type StreamCancelOffscreenRequest = z.infer<typeof streamCancelOffscreenRequestSchema>;
-
-export const preparedFileSchema = z.object({
-  name: z.string().min(1),
-  filename: z.string().min(1),
-  sizeBytes: z.number().int().nonnegative(),
-});
-export type PreparedFile = z.infer<typeof preparedFileSchema>;
-
-export const streamPrepareResponseSchema = z.object({
-  requestId: z.uuid(),
-  ok: z.boolean(),
-  file: preparedFileSchema.optional(),
-  error: z.string().optional(),
-});
-export type StreamPrepareResponse = z.infer<typeof streamPrepareResponseSchema>;
-
-export const streamPrepareResultMessageSchema = streamPrepareResponseSchema.extend({
-  type: z.literal("streams.result"),
-});
-export type StreamPrepareResultMessage = z.infer<typeof streamPrepareResultMessageSchema>;
-
-export const streamProgressMessageSchema = z.object({
-  type: z.literal("streams.progress"),
-  requestId: z.uuid(),
-  subIndex: z.number().int().nonnegative(),
-  subTotal: z.number().int().positive(),
-});
-export type StreamProgressMessage = z.infer<typeof streamProgressMessageSchema>;
-
+/** Handshake: o documento offscreen avisa que já registrou seus listeners. */
 export const offscreenReadyMessageSchema = z.object({
   type: z.literal("streams.ready"),
 });
 export type OffscreenReadyMessage = z.infer<typeof offscreenReadyMessageSchema>;
 
+/** Pedido de fechamento do documento offscreen. */
 export const offscreenCloseMessageSchema = z.object({
   type: z.literal("streams.close"),
 });
 export type OffscreenCloseMessage = z.infer<typeof offscreenCloseMessageSchema>;
+
+/** Ciclo de vida de um job de download. */
+export const downloadStatusSchema = z.enum(["running", "ready", "done", "error", "cancelled"]);
+export type DownloadStatus = z.infer<typeof downloadStatusSchema>;
+
+/**
+ * Estado observável de um job de download. Fica em `chrome.storage.session`
+ * para que o side panel se reconecte mesmo depois de fechado e reaberto.
+ */
+export const downloadJobStateSchema = z.object({
+  jobId: z.uuid(),
+  status: downloadStatusSchema,
+  zipName: z.string().min(1),
+  total: z.number().int().nonnegative(),
+  index: z.number().int().nonnegative(),
+  filename: z.string(),
+  loadedBytes: z.number().nonnegative(),
+  totalBytes: z.number().nonnegative().optional(),
+  filePercent: z.number().min(0).max(100),
+  overallPercent: z.number().min(0).max(100),
+  subIndex: z.number().int().nonnegative().optional(),
+  subTotal: z.number().int().positive().optional(),
+  /** ZIP temporário no OPFS (fallback quando não dá para gravar direto no disco). */
+  stagedName: z.string().optional(),
+  error: z.string().optional(),
+  updatedAt: z.iso.datetime(),
+});
+export type DownloadJobState = z.infer<typeof downloadJobStateSchema>;
+
+/** Inicia um download em lote; a lista de itens é totalmente serializável. */
+export const downloadStartRequestSchema = z.object({
+  type: z.literal("downloads.start"),
+  jobId: z.uuid(),
+  zipName: z.string().min(1),
+  items: z.array(mediaItemSchema),
+  policy: streamVariantPolicySchema,
+});
+export type DownloadStartRequest = z.infer<typeof downloadStartRequestSchema>;
+
+/** Variante interna, aceita apenas pelo documento offscreen. */
+export const downloadStartOffscreenRequestSchema = downloadStartRequestSchema.extend({
+  type: z.literal("downloads.start.offscreen"),
+});
+export type DownloadStartOffscreenRequest = z.infer<typeof downloadStartOffscreenRequestSchema>;
+
+/** Cancela o job de download ativo no offscreen. */
+export const downloadCancelRequestSchema = z.object({
+  type: z.literal("downloads.cancel"),
+  jobId: z.uuid(),
+});
+export type DownloadCancelRequest = z.infer<typeof downloadCancelRequestSchema>;
+
+export const downloadCancelOffscreenRequestSchema = downloadCancelRequestSchema.extend({
+  type: z.literal("downloads.cancel.offscreen"),
+});
+export type DownloadCancelOffscreenRequest = z.infer<typeof downloadCancelOffscreenRequestSchema>;
+
+/** Atualização de estado emitida pelo offscreen (progresso + transições). */
+export const downloadStateMessageSchema = z.object({
+  type: z.literal("downloads.state"),
+  state: downloadJobStateSchema,
+});
+export type DownloadStateMessage = z.infer<typeof downloadStateMessageSchema>;

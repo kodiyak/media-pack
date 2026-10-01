@@ -25,6 +25,25 @@ export function canUseFileSystemAccess(): boolean {
 }
 
 /**
+ * Cria um destino a partir de um handle já existente (ex.: recuperado do
+ * IndexedDB pelo documento offscreen). Pode lançar se a permissão de escrita
+ * não valer mais — o chamador decide o fallback.
+ */
+export async function sinkFromFileHandle(handle: FileHandleLike): Promise<ZipSink> {
+  const writable = await handle.createWritable();
+
+  return {
+    name: handle.name,
+    async write(stream) {
+      await stream.pipeTo(writable);
+    },
+    async abort() {
+      await writable.abort().catch(() => {});
+    },
+  };
+}
+
+/**
  * Prepara o destino do ZIP **antes** do download. Precisa ser chamado no gesto
  * do usuário (clique) para o seletor de arquivo funcionar.
  */
