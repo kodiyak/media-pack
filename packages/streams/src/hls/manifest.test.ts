@@ -25,6 +25,12 @@ seg0.m4s
 #EXT-X-ENDLIST
 `;
 
+const MASTER_WITH_AUDIO = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO="aud"
+720/index.m3u8
+`;
+
 describe("parseHlsManifest", () => {
   it("lê variantes de uma master playlist", () => {
     const info = parseHlsManifest(MASTER, "https://cdn.test/master.m3u8");
@@ -33,6 +39,15 @@ describe("parseHlsManifest", () => {
     expect(info.variants?.[1]?.url).toBe("https://cdn.test/720/index.m3u8");
     expect(info.variants?.[1]?.height).toBe(720);
     expect(info.variants?.[1]?.bandwidth).toBe(3_000_000);
+  });
+
+  it("coleta as rendições de vídeo e áudio do master", () => {
+    const info = parseHlsManifest(MASTER_WITH_AUDIO, "https://cdn.test/master.m3u8");
+
+    expect(info.renditionUrls).toEqual([
+      "https://cdn.test/720/index.m3u8",
+      "https://cdn.test/audio/en.m3u8",
+    ]);
   });
 
   it("lê uma media playlist TS (VOD)", () => {

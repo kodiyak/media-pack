@@ -16,11 +16,10 @@ import { openDashTrack, openHlsStream } from "@repo/streams";
 
 const activeJobs = new Map<string, AbortController>();
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: unknown) => {
   const cancel = streamCancelOffscreenRequestSchema.safeParse(message);
   if (cancel.success) {
     activeJobs.get(cancel.data.requestId)?.abort();
-    sendResponse({ ok: true });
     return false;
   }
 
@@ -28,16 +27,23 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   if (!request.success) return false;
 
   void prepare(request.data)
-    .then(sendResponse)
-    .catch((error: unknown) => {
-      sendResponse({
+    .then((response) => sendWithoutResponse({ type: "streams.result", ...response }))
+    .catch((error: unknown) =>
+      sendWithoutResponse({
+        type: "streams.result",
         requestId: request.data.requestId,
         ok: false,
         error: toErrorMessage(error),
-      } satisfies StreamPrepareResponse);
-    });
-  return true;
+      } satisfies StreamPrepareResponse & { type: "streams.result" }),
+    );
+  return false;
 });
+
+function sendWithoutResponse(message: unknown): void {
+  chrome.runtime.sendMessage(message, () => {
+    void chrome.runtime.lastError;
+  });
+}
 
 async function prepare(request: StreamPrepareOffscreenRequest): Promise<StreamPrepareResponse> {
   const controller = new AbortController();
@@ -51,7 +57,7 @@ async function prepare(request: StreamPrepareOffscreenRequest): Promise<StreamPr
 
     const body = await openSource(request, controller.signal, (progress) => {
       if (progress.subIndex === undefined || progress.subTotal === undefined) return;
-      void chrome.runtime.sendMessage({
+      sendWithoutResponse({
         type: "streams.progress",
         requestId: request.requestId,
         subIndex: progress.subIndex,

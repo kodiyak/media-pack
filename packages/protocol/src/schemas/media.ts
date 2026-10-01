@@ -37,6 +37,7 @@ export const streamInfoSchema = z.object({
   estimatedBytes: z.number().int().nonnegative().optional(),
   variants: z.array(streamVariantSchema).optional(),
   selectedVariantUrl: z.url().optional(),
+  renditionUrls: z.array(z.url()).optional(),
   resolvedAt: z.iso.datetime().optional(),
 });
 export type StreamInfo = z.infer<typeof streamInfoSchema>;

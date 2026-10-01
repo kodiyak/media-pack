@@ -44,6 +44,8 @@ pnpm install
    `streamType` (HLS/DASH).
 2. `@repo/media` classifica cada resposta (tipo, nome de arquivo a partir do
    `Content-Disposition`/URL, tamanho) e o item é gravado em `chrome.storage.session`.
+   Para HLS, **o master vence sobre suas rendições**: variantes de vídeo, áudio e legenda
+   não viram downloads separados (o service worker remove os itens redundantes).
 3. **S1 (eager-manifest)**: para cada manifesto, `@repo/streams` baixa somente o `.m3u8`/`.mpd`
    (alguns KB) e enriquece o item com **variantes, duração, container (TS/fMP4), criptografia e
    tamanho estimado**. Antes do clique em **Baixar**, não há download de segmentos, transmux,
@@ -96,7 +98,7 @@ Lógica pura (sem `chrome.*`), por isso 100% testável:
 Resolução de manifestos (**S1**) e conversão **HLS/DASH → MP4** em streaming (**Fases B e C**):
 
 - `resolveStreamInfo(...)` → `Partial<StreamInfo>` (variantes, duração, container, criptografia,
-  tamanho estimado); `parseHlsManifest` / `parseDashManifest` → metadados.
+  tamanho estimado, `renditionUrls` do master); `parseHlsManifest` / `parseDashManifest` → metadados.
 - **HLS**: `buildHlsPlan` (URLs, byte ranges `EXT-X-BYTERANGE`, AES-128, init `EXT-X-MAP`) +
   `openHlsStream({ url, policy, signal, onProgress })`:
   - fMP4 (`EXT-X-MAP`) → concatena `init` + segmentos;

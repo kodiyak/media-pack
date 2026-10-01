@@ -65,6 +65,11 @@ export const streamPrepareResponseSchema = z.object({
 });
 export type StreamPrepareResponse = z.infer<typeof streamPrepareResponseSchema>;
 
+export const streamPrepareResultMessageSchema = streamPrepareResponseSchema.extend({
+  type: z.literal("streams.result"),
+});
+export type StreamPrepareResultMessage = z.infer<typeof streamPrepareResultMessageSchema>;
+
 export const streamProgressMessageSchema = z.object({
   type: z.literal("streams.progress"),
   requestId: z.uuid(),

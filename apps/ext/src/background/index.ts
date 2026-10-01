@@ -7,6 +7,7 @@ import {
   type StreamPrepareRequest,
   streamCancelRequestSchema,
   streamPrepareRequestSchema,
+  streamPrepareResultMessageSchema,
   z,
 } from "@repo/protocol";
 import { resolveStreamInfo } from "@repo/streams";
@@ -15,6 +16,9 @@ const MEDIA_KEY = "media";
 const MAX_ITEMS = 2000;
 
 const mediaListSchema = z.array(mediaItemSchema);
+
+/** URLs de rendições (variantes/áudio/legenda) já cobertas por uma master playlist. */
+const knownRenditionUrls = new Set<string>();
 
 type TabInfo = { url?: string; title?: string };
 
@@ -38,6 +42,10 @@ const offscreenApi = (chrome as unknown as { offscreen?: OffscreenApi }).offscre
 const runtimeWithContexts = chrome.runtime as RuntimeWithContexts;
 const offscreenUrl = chrome.runtime.getURL("offscreen.html");
 let offscreenReady = false;
+const pendingPrepares = new Map<
+  string,
+  { resolve: (value: unknown) => void; reject: (error: unknown) => void }
+>();
 
 /** Cria o documento offscreen somente quando o usuário inicia um download. */
 async function ensureOffscreen(): Promise<void> {
@@ -69,25 +77,62 @@ async function closeOffscreen(): Promise<void> {
 
 async function forwardStreamPrepare(request: StreamPrepareRequest): Promise<unknown> {
   await ensureOffscreen();
+
+  const result = new Promise<unknown>((resolve, reject) => {
+    pendingPrepares.set(request.requestId, { resolve, reject });
+  });
+
   try {
-    return await chrome.runtime.sendMessage({
+    sendWithoutResponse({
       ...request,
       type: "streams.prepare.offscreen",
     });
+    return await withTimeout(result, 10 * 60 * 1000, "Tempo limite da conversão offscreen.");
   } finally {
+    pendingPrepares.delete(request.requestId);
     await closeOffscreen();
   }
 }
 
 async function forwardStreamCancel(request: StreamCancelRequest): Promise<unknown> {
   if (!offscreenReady) return { ok: true };
-  return chrome.runtime.sendMessage({
+  sendWithoutResponse({
     ...request,
     type: "streams.cancel.offscreen",
   });
+  return { ok: true };
+}
+
+function sendWithoutResponse(message: unknown): void {
+  chrome.runtime.sendMessage(message, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), milliseconds);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  const result = streamPrepareResultMessageSchema.safeParse(message);
+  if (result.success) {
+    pendingPrepares.get(result.data.requestId)?.resolve(result.data);
+    return false;
+  }
+
   const prepare = streamPrepareRequestSchema.safeParse(message);
   if (prepare.success) {
     void forwardStreamPrepare(prepare.data)
@@ -197,6 +242,19 @@ async function readList(): Promise<MediaItem[]> {
   return parsed.success ? parsed.data : [];
 }
 
+/** Remove itens cuja URL é uma rendição já coberta por um master HLS. */
+function removeItemsByUrls(urls: string[]): Promise<void> {
+  const toRemove = new Set(urls);
+  if (toRemove.size === 0) return Promise.resolve();
+
+  return enqueueWrite(async () => {
+    const current = await readList();
+    const next = current.filter((item) => !toRemove.has(item.url));
+    if (next.length === current.length) return;
+    await chrome.storage.session.set({ [MEDIA_KEY]: next });
+  });
+}
+
 function saveMedia(classified: ClassifiedMedia): Promise<void> {
   return enqueueWrite(async () => {
     const current = await readList();
@@ -225,6 +283,18 @@ async function enrichStream(item: MediaItem): Promise<void> {
 
   try {
     const info = await resolveStreamInfo({ url: item.url, streamType: item.streamType });
+
+    // HLS: o master "vence" — suas rendições (vídeo/áudio/legenda) não viram downloads.
+    if (item.streamType === "hls") {
+      const renditionUrls = info.renditionUrls ?? [];
+      if (renditionUrls.length > 0) {
+        for (const url of renditionUrls) knownRenditionUrls.add(url);
+        await removeItemsByUrls(renditionUrls);
+      } else if (knownRenditionUrls.has(item.url)) {
+        await removeItemsByUrls([item.url]);
+        return;
+      }
+    }
 
     await enqueueWrite(async () => {
       const current = await readList();
