@@ -7,16 +7,16 @@ export default defineManifest({
   description: "Identifica mídias enquanto as páginas carregam e baixa tudo em um ZIP.",
   minimum_chrome_version: "116",
   icons: {
-    "16": "icons/icon-16.webp",
-    "32": "icons/icon-32.webp",
-    "48": "icons/icon-48.webp",
-    "128": "icons/icon-128.webp",
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png",
   },
   action: {
     default_title: "Abrir Media Pack",
     default_icon: {
-      "16": "icons/icon-16.webp",
-      "32": "icons/icon-32.webp",
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
     },
   },
   side_panel: {
