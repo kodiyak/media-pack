@@ -1,0 +1,39 @@
+{
+  "name": "@repo/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./globals.css": "./src/styles/globals.css",
+    "./components/*": "./src/components/*.tsx",
+    "./hooks/*": "./src/hooks/*.ts",
+    "./lib/*": "./src/lib/*.ts"
+  },
+  "scripts": {
+    "ui": "shadcn",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf .turbo node_modules"
+  },
+  "dependencies": {
+    "class-variance-authority": "catalog:",
+    "cn": "catalog:",
+    "radix-ui": "catalog:",
+    "tw-animate-css": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "rimraf": "catalog:",
+    "shadcn": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

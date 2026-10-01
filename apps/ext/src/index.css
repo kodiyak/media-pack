@@ -1,0 +1,6 @@
+@import "@repo/ui/globals.css";
+
+/* Fontes de conteúdo específicas deste app */
+@source "../sidepanel.html";
+@source "./**/*.{ts,tsx}";
+@source "../../../packages/ui/src/**/*.{ts,tsx}";
