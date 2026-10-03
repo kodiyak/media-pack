@@ -4,6 +4,8 @@ import {
   type DownloadJobState,
   type DownloadStartRequest,
   downloadCancelRequestSchema,
+  downloadDismissRequestSchema,
+  downloadJobsSchema,
   downloadStartRequestSchema,
   downloadStateMessageSchema,
   type MediaItem,
@@ -14,19 +16,13 @@ import {
 } from "@repo/protocol";
 import { resolveStreamInfo } from "@repo/streams";
 import { startAutoReload } from "./auto-reload";
+import { DownloadJobRegistry, isTerminalDownload, MAX_CONCURRENT_DOWNLOADS } from "./job-registry";
 
 const MEDIA_KEY = "media";
 const DOWNLOAD_KEY = "downloadJob";
 const MAX_ITEMS = 2000;
 
 const mediaListSchema = z.array(mediaItemSchema);
-
-const TERMINAL_DOWNLOAD_STATUS = new Set<DownloadJobState["status"]>([
-  "ready",
-  "done",
-  "error",
-  "cancelled",
-]);
 
 /** URLs de rendições (variantes/áudio/legenda) já cobertas por uma master playlist. */
 const knownRenditionUrls = new Set<string>();
@@ -44,19 +40,49 @@ type OffscreenApi = {
 
 const offscreenApi = (chrome as unknown as { offscreen?: OffscreenApi }).offscreen;
 let offscreenReady = false;
+let offscreenPromise: Promise<void> | null = null;
 let resolveOffscreenReady: (() => void) | null = null;
 
-// Estado do download guardado no service worker para o side panel se reconectar
-// depois de ser fechado e reaberto.
-let latestDownload: DownloadJobState | null = null;
+// Estado dos downloads guardado no service worker para o side panel se
+// reconectar depois de ser fechado e reaberto. Vários jobs podem coexistir
+// (um por aba), então usamos um mapa em vez de um único job.
+const downloadJobs = new DownloadJobRegistry();
 let persistTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Restaura o mapa de jobs do storage ao acordar o service worker. Sem isso, um
+ * reinício perderia os jobs das outras abas ao persistir novamente.
+ */
+const hydrateDownloadJobs: Promise<void> = chrome.storage.session
+  .get(DOWNLOAD_KEY)
+  .then((stored) => {
+    const parsed = downloadJobsSchema.safeParse(stored[DOWNLOAD_KEY]);
+    if (!parsed.success) return;
+    for (const job of Object.values(parsed.data)) downloadJobs.upsert(job);
+  })
+  .catch((error: unknown) => {
+    console.error("[media-pack] falha ao restaurar jobs de download", error);
+  });
+
+/** Grava o mapa inteiro de jobs em `storage.session`. */
+function persistDownloadJobs(): void {
+  void chrome.storage.session.set({ [DOWNLOAD_KEY]: downloadJobs.toRecord() });
+}
 
 /**
  * Garante um documento offscreen pronto. Se ele já existir (ex.: o service
  * worker reiniciou), reaproveita — recriar mataria um download em andamento.
+ * Chamadas concorrentes compartilham a mesma promessa de criação.
  */
 async function ensureOffscreen(): Promise<void> {
   if (offscreenReady) return;
+  offscreenPromise ??= createOffscreen().finally(() => {
+    offscreenPromise = null;
+  });
+  return offscreenPromise;
+}
+
+async function createOffscreen(): Promise<void> {
   if (!offscreenApi) throw new Error("A API offscreen não está disponível.");
 
   if (await hasOffscreenDocument()) {
@@ -99,34 +125,57 @@ async function hasOffscreenDocument(): Promise<boolean> {
 
 async function closeOffscreen(): Promise<void> {
   if (!offscreenApi) return;
+  await hydrateDownloadJobs;
+  // Nunca derruba o offscreen com um download em andamento.
+  if (downloadJobs.runningCount() > 0) return;
   offscreenReady = false;
   await offscreenApi.closeDocument().catch(() => {});
 }
 
-/** Persiste o estado (com throttle) e fecha o offscreen quando o job termina. */
+/**
+ * Persiste o estado (com throttle) e só fecha o offscreen quando o último job
+ * ativo termina. Jobs concorrentes continuam baixando até lá.
+ */
 function persistDownloadState(state: DownloadJobState): void {
-  latestDownload = state;
+  downloadJobs.upsert(state);
 
-  if (TERMINAL_DOWNLOAD_STATUS.has(state.status)) {
+  if (isTerminalDownload(state.status)) {
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = undefined;
     }
-    void chrome.storage.session.set({ [DOWNLOAD_KEY]: state });
-    void closeOffscreen();
+    persistDownloadJobs();
+    if (downloadJobs.runningCount() === 0) void closeOffscreen();
     return;
   }
 
   if (persistTimer) return;
   persistTimer = setTimeout(() => {
     persistTimer = undefined;
-    void chrome.storage.session.set({ [DOWNLOAD_KEY]: latestDownload });
+    persistDownloadJobs();
   }, 300);
 }
 
 async function startDownload(request: DownloadStartRequest): Promise<{ ok: true }> {
-  await ensureOffscreen();
-  sendWithoutResponse({ ...request, type: "downloads.start.offscreen" });
+  await hydrateDownloadJobs;
+
+  if (downloadJobs.isBusy(request.tabId)) {
+    throw new Error("Já existe um download em andamento nesta aba.");
+  }
+  if (!downloadJobs.canStart()) {
+    throw new Error(`Limite de ${MAX_CONCURRENT_DOWNLOADS} downloads simultâneos atingido.`);
+  }
+
+  // Remove estados terminais antigos da mesma aba para não acumular.
+  if (downloadJobs.clearTerminalForTab(request.tabId)) persistDownloadJobs();
+
+  downloadJobs.beginStart(request.tabId);
+  try {
+    await ensureOffscreen();
+    sendWithoutResponse({ ...request, type: "downloads.start.offscreen" });
+  } finally {
+    downloadJobs.endStart(request.tabId);
+  }
   return { ok: true };
 }
 
@@ -178,7 +227,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 
   const state = downloadStateMessageSchema.safeParse(message);
   if (state.success) {
-    persistDownloadState(state.data.state);
+    void hydrateDownloadJobs.then(() => persistDownloadState(state.data.state));
     return false;
   }
 
@@ -198,6 +247,14 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return true;
   }
 
+  const dismiss = downloadDismissRequestSchema.safeParse(message);
+  if (dismiss.success) {
+    void hydrateDownloadJobs.then(() => {
+      if (downloadJobs.remove(dismiss.data.jobId)) persistDownloadJobs();
+    });
+    return false;
+  }
+
   return false;
 });
 
@@ -214,6 +271,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabInfo.delete(tabId);
+  // Jobs finalizados de uma aba fechada não precisam mais do estado persistido.
+  void hydrateDownloadJobs.then(() => {
+    if (downloadJobs.clearTerminalForTab(tabId)) persistDownloadJobs();
+  });
 });
 
 async function resolveTabInfo(tabId: number): Promise<TabInfo> {

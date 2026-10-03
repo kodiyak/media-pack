@@ -238,7 +238,7 @@ store-only** (sem recompressão).
             └─ encaminha "downloads.start.offscreen"
             │
             ▼  Offscreen document   ← o download roda AQUI (sobrevive ao painel)
-            ├─ cleanupOpfs()
+            ├─ cleanupOpfs({}, stagedNames)   ← protege ZIPs staged de outros jobs
             ├─ buildDownloadSources(items, policy, signal)
             ├─ createSink():
             │     ├─ handle do IndexedDB → createWritable() → grava DIRETO no disco
@@ -252,6 +252,13 @@ store-only** (sem recompressão).
  Fechar o painel no meio? O offscreen continua baixando.
  Reabrir? Lê o snapshot de storage.session → reconecta no progresso.
 ```
+
+> **Concorrência (um job por aba):** o estado persistido é um **mapa
+> `jobId → estado`** (com `tabId`), não um único job. O painel mostra apenas o job
+> da **aba ativa**; downloads de outras abas seguem rodando. O offscreen é
+> **compartilhado** por todos os jobs e só fecha quando o **último** job ativo
+> termina. Limites: **10 jobs simultâneos** no total e **1 por aba**; conversões
+> HLS/DASH passam por um semáforo de **3 vagas** (arquivos diretos não).
 
 > **Persistência:** o *writer* (ZIP) e o *producer* (conversão) vivem no offscreen,
 > não no painel. O `FileSystemFileHandle` viaja pelo **IndexedDB** (mesma origem da
@@ -384,6 +391,8 @@ agora entrega **um único `.mp4`** quando muxa.
 ```
 
 Cancelamento: `downloads.cancel.offscreen` → `AbortController` do job ativo.
+Dispensa: `downloads.dismiss` remove um job finalizado do mapa persistido (após
+salvar o ZIP staged).
 
 ---
 
@@ -407,15 +416,18 @@ Três camadas, com propósitos distintos:
  service worker                    side panel (ao reabrir)
  ──────────────                    ────────────────────────
  downloads.state (offscreen)       lê storage.session["downloadJob"]
-      │ throttle 300ms              │
+      │ throttle 300ms              │ (mapa jobId → estado)
       ▼                             ▼
- storage.session["downloadJob"]    remonta as duas barras (running)
-   { status, filePercent,          ou o botão "Salvar ZIP" (ready)
-     overallPercent, stagedName? }
+ storage.session["downloadJob"]    seleciona o job cujo tabId == aba ativa
+   { jobId → { tabId, status,     │
+     filePercent, overallPercent, monta as duas barras (running)
+     stagedName? } }              ou o botão "Salvar ZIP" (ready)
 ```
 
 Estados: `running` → `done` (gravou no disco) | `ready` (ZIP no OPFS) | `error` | `cancelled`.
-Ao chegar num estado terminal, o service worker fecha o offscreen.
+O offscreen só é fechado quando **todos** os jobs chegam a um estado terminal.
+Ao acordar, o service worker **hidrata** o mapa a partir do storage (um reinício
+não pode apagar os jobs das outras abas).
 
 ### Handles e staging
 

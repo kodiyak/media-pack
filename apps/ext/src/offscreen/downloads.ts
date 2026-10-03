@@ -19,6 +19,9 @@ type SendMessage = (message: unknown) => void;
 
 const activeJobs = new Map<string, AbortController>();
 
+/** ZIPs staged no OPFS que ainda pertencem a um job (protegidos da limpeza). */
+const stagedNames = new Set<string>();
+
 /** Cancela o job em andamento (o offscreen permanece vivo para o próximo). */
 export function cancelDownload(jobId: string): void {
   activeJobs.get(jobId)?.abort();
@@ -38,6 +41,7 @@ export async function runDownload(
 
   let state: DownloadJobState = {
     jobId: request.jobId,
+    tabId: request.tabId,
     status: "running",
     zipName: request.zipName,
     total: 0,
@@ -55,7 +59,7 @@ export async function runDownload(
   };
 
   try {
-    await cleanupOpfs();
+    await cleanupOpfs({}, stagedNames);
     const sources = await buildDownloadSources(request.items, request.policy, controller.signal);
     emit({ total: sources.length });
 
@@ -101,6 +105,7 @@ async function createSink(
   }
 
   const stagedName = createOpfsFileName(".zip");
+  stagedNames.add(stagedName);
   return {
     name: request.zipName,
     stagedName,
@@ -108,6 +113,7 @@ async function createSink(
       await writeOpfsFile(stagedName, stream, signal);
     },
     async abort() {
+      stagedNames.delete(stagedName);
       await deleteOpfsFile(stagedName).catch(() => {});
     },
   };

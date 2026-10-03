@@ -54,9 +54,10 @@ import {
   useState,
 } from "react";
 import { useCollectedMedia, useCurrentTabId, useDownloadJob, useMediaPrefs } from "./hooks";
-import { clearDownloadJob, clearStoredMedia } from "./lib/chrome";
+import { clearStoredMedia } from "./lib/chrome";
 import {
   cancelDownload,
+  dismissDownload,
   pickAndStoreFileHandle,
   saveStagedZip,
   startDownload,
@@ -91,13 +92,20 @@ export function App() {
 
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
-  const [job, setJob] = useDownloadJob();
+  const [job, setJob] = useDownloadJob(currentTabId);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const handledJobRef = useRef<string | null>(null);
   const searchId = useId();
 
   const busy = starting || job?.status === "running";
+
+  // Ao trocar de aba o painel passa a refletir o job daquela aba.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset proposital ao trocar de aba
+  useEffect(() => {
+    setError(null);
+    setStarting(false);
+  }, [currentTabId]);
 
   useEffect(() => {
     if (!job) return;
@@ -173,7 +181,7 @@ export function App() {
   }, []);
 
   const handleDownload = useCallback(async () => {
-    if (busy || selected.length === 0) return;
+    if (busy || selected.length === 0 || currentTabId === null) return;
 
     const jobId = crypto.randomUUID();
     const zipName = buildZipName();
@@ -189,6 +197,7 @@ export function App() {
 
       const response = await startDownload({
         jobId,
+        tabId: currentTabId,
         zipName,
         items: selected,
         policy: prefs.streamVariantPolicy,
@@ -197,6 +206,7 @@ export function App() {
 
       setJob({
         jobId,
+        tabId: currentTabId,
         status: "running",
         zipName,
         total: selected.length,
@@ -216,7 +226,7 @@ export function App() {
     } finally {
       setStarting(false);
     }
-  }, [busy, selected, prefs.streamVariantPolicy, setJob]);
+  }, [busy, selected, currentTabId, prefs.streamVariantPolicy, setJob]);
 
   const handleCancel = useCallback(() => {
     if (job) cancelDownload(job.jobId);
@@ -235,7 +245,7 @@ export function App() {
         toast.error("Falha ao salvar", { description: message });
       }
     } finally {
-      void clearDownloadJob();
+      dismissDownload(job.jobId);
       setJob(null);
     }
   }, [job, setJob]);
@@ -450,7 +460,7 @@ export function App() {
         <div className="flex gap-2">
           <Button
             className="flex-1"
-            disabled={busy || selected.length === 0}
+            disabled={busy || selected.length === 0 || currentTabId === null}
             onClick={() => void handleDownload()}
           >
             <Download />

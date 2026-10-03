@@ -23,6 +23,8 @@ export type DownloadStatus = z.infer<typeof downloadStatusSchema>;
  */
 export const downloadJobStateSchema = z.object({
   jobId: z.uuid(),
+  /** Aba que iniciou o job (para o painel mostrar só o job da aba ativa). */
+  tabId: z.number().int().optional(),
   status: downloadStatusSchema,
   zipName: z.string().min(1),
   total: z.number().int().nonnegative(),
@@ -41,10 +43,15 @@ export const downloadJobStateSchema = z.object({
 });
 export type DownloadJobState = z.infer<typeof downloadJobStateSchema>;
 
+/** Mapa `jobId → estado`, persistido em `chrome.storage.session`. */
+export const downloadJobsSchema = z.record(z.string(), downloadJobStateSchema);
+export type DownloadJobs = z.infer<typeof downloadJobsSchema>;
+
 /** Inicia um download em lote; a lista de itens é totalmente serializável. */
 export const downloadStartRequestSchema = z.object({
   type: z.literal("downloads.start"),
   jobId: z.uuid(),
+  tabId: z.number().int(),
   zipName: z.string().min(1),
   items: z.array(mediaItemSchema),
   policy: streamVariantPolicySchema,
@@ -68,6 +75,13 @@ export const downloadCancelOffscreenRequestSchema = downloadCancelRequestSchema.
   type: z.literal("downloads.cancel.offscreen"),
 });
 export type DownloadCancelOffscreenRequest = z.infer<typeof downloadCancelOffscreenRequestSchema>;
+
+/** Remove um job finalizado do estado persistido (ex.: após salvar o ZIP staged). */
+export const downloadDismissRequestSchema = z.object({
+  type: z.literal("downloads.dismiss"),
+  jobId: z.uuid(),
+});
+export type DownloadDismissRequest = z.infer<typeof downloadDismissRequestSchema>;
 
 /** Atualização de estado emitida pelo offscreen (progresso + transições). */
 export const downloadStateMessageSchema = z.object({

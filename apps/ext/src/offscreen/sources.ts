@@ -1,4 +1,10 @@
-import { type DownloadSource, toErrorMessage, urlSource } from "@repo/downloader";
+import {
+  createSemaphore,
+  type DownloadSource,
+  releaseOnEnd,
+  toErrorMessage,
+  urlSource,
+} from "@repo/downloader";
 import type { MediaItem, StreamVariantPolicy } from "@repo/protocol";
 import {
   hlsOutputFilename,
@@ -7,6 +13,14 @@ import {
   resolveDashTracks,
   streamBaseName,
 } from "@repo/streams";
+
+/**
+ * Teto de conversões HLS/DASH simultâneas. Downloads concorrentes repartem essas
+ * vagas; os que excedem esperam a fila, sem nunca tocar no limite global de jobs.
+ */
+export const MAX_CONCURRENT_CONVERSIONS = 3;
+
+const conversionSlots = createSemaphore(MAX_CONCURRENT_CONVERSIONS);
 
 /**
  * Monta as fontes do ZIP a partir dos itens selecionados. Roda no offscreen, então
@@ -24,13 +38,15 @@ export async function buildDownloadSources(
       sources.push({
         filename: hlsOutputFilename(item),
         async open(openSignal, onProgress) {
-          const opened = await openHlsStream({
-            url: item.url,
-            policy,
-            signal: openSignal ?? signal,
-            onProgress,
+          return openWithSlot(openSignal ?? signal, async () => {
+            const opened = await openHlsStream({
+              url: item.url,
+              policy,
+              signal: openSignal ?? signal,
+              onProgress,
+            });
+            return opened.body;
           });
-          return { body: opened.body };
         },
       });
       continue;
@@ -47,6 +63,28 @@ export async function buildDownloadSources(
   return sources;
 }
 
+/** Reserva uma vaga de conversão e devolve o stream que a libera ao terminar. */
+async function openWithSlot(
+  signal: AbortSignal,
+  open: () => Promise<ReadableStream<Uint8Array>>,
+): Promise<{ body: ReadableStream<Uint8Array> }> {
+  const release = await conversionSlots.acquire(signal);
+  const onAbort = (): void => release();
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  const cleanup = (): void => {
+    signal.removeEventListener("abort", onAbort);
+    release();
+  };
+
+  try {
+    return { body: releaseOnEnd(await open(), cleanup) };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 async function buildDashSources(
   item: MediaItem,
   policy: StreamVariantPolicy,
@@ -61,11 +99,13 @@ async function buildDashSources(
     return tracks.map((track) => ({
       filename: track.kind === "video" ? `${base}.mp4` : `${base}.audio.m4a`,
       async open(openSignal, onProgress) {
-        const opened = await openDashTrack(track.plan, {
-          signal: openSignal ?? signal,
-          onProgress,
+        return openWithSlot(openSignal ?? signal, async () => {
+          const opened = await openDashTrack(track.plan, {
+            signal: openSignal ?? signal,
+            onProgress,
+          });
+          return opened.body;
         });
-        return { body: opened.body };
       },
     }));
   } catch (error) {

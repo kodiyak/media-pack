@@ -1,15 +1,15 @@
 import {
   DEFAULT_MEDIA_PREFS,
   type DownloadJobState,
-  downloadJobStateSchema,
+  downloadJobsSchema,
   type MediaItem,
   type MediaPrefs,
 } from "@repo/protocol";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   DOWNLOAD_KEY,
   hasExtensionApi,
-  readDownloadJob,
+  readDownloadJobs,
   readPrefs,
   readStoredMedia,
   subscribeToMedia,
@@ -98,27 +98,36 @@ export function useMediaPrefs(): [MediaPrefs, (patch: Partial<MediaPrefs>) => vo
 }
 
 /**
- * Estado do job de download com reconexão: lê o snapshot persistido no storage
- * e acompanha as atualizações ao vivo do offscreen. Assim fechar e reabrir o
- * painel não perde o progresso (o download segue rodando no offscreen).
+ * Job de download da aba informada. O painel guarda todos os estados (mapa) e
+ * filtra pela aba ativa, de modo que trocar de aba troca o job exibido — e
+ * downloads de outras abas continuam rodando em segundo plano. A reconexão
+ * funciona lendo o snapshot persistido no storage e acompanhando o offscreen.
  */
-export function useDownloadJob(): [
-  DownloadJobState | null,
-  (state: DownloadJobState | null) => void,
-] {
-  const [state, setState] = useState<DownloadJobState | null>(null);
+export function useDownloadJob(
+  tabId: number | null,
+): [DownloadJobState | null, (state: DownloadJobState | null) => void] {
+  const [jobs, setJobs] = useState<DownloadJobState[]>([]);
 
   useEffect(() => {
     if (!hasExtensionApi()) return;
 
     let active = true;
-    void readDownloadJob().then((stored) => {
-      if (active && stored) setState(stored);
+    void readDownloadJobs().then((stored) => {
+      if (active) setJobs(stored);
     });
 
-    const unsubscribe = subscribeToDownloadState((next) => {
-      if (active) setState(next);
-    });
+    const upsert = (state: DownloadJobState): void => {
+      if (!active) return;
+      setJobs((current) => {
+        const index = current.findIndex((job) => job.jobId === state.jobId);
+        if (index < 0) return [...current, state];
+        const next = current.slice();
+        next[index] = state;
+        return next;
+      });
+    };
+
+    const unsubscribe = subscribeToDownloadState(upsert);
 
     const onChanged = (
       changes: Record<string, chrome.storage.StorageChange>,
@@ -127,8 +136,8 @@ export function useDownloadJob(): [
       if (areaName !== "session") return;
       const change = changes[DOWNLOAD_KEY];
       if (!change) return;
-      const parsed = downloadJobStateSchema.safeParse(change.newValue);
-      if (active) setState(parsed.success ? parsed.data : null);
+      const parsed = downloadJobsSchema.safeParse(change.newValue);
+      if (active) setJobs(parsed.success ? Object.values(parsed.data) : []);
     };
     chrome.storage.onChanged.addListener(onChanged);
 
@@ -139,5 +148,21 @@ export function useDownloadJob(): [
     };
   }, []);
 
-  return [state, setState];
+  const job = useMemo(() => jobs.find((entry) => entry.tabId === tabId) ?? null, [jobs, tabId]);
+
+  const setJob = useCallback(
+    (state: DownloadJobState | null) => {
+      setJobs((current) => {
+        if (!state) return current.filter((entry) => entry.tabId !== tabId);
+        const index = current.findIndex((entry) => entry.jobId === state.jobId);
+        if (index < 0) return [...current, state];
+        const next = current.slice();
+        next[index] = state;
+        return next;
+      });
+    },
+    [tabId],
+  );
+
+  return [job, setJob];
 }

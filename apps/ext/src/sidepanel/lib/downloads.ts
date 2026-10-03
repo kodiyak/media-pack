@@ -51,6 +51,14 @@ export function cancelDownload(jobId: string): void {
   });
 }
 
+/** Pede ao service worker para remover um job finalizado do estado persistido. */
+export function dismissDownload(jobId: string): void {
+  if (!hasExtensionApi()) return;
+  chrome.runtime.sendMessage({ type: "downloads.dismiss", jobId }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 /** Escuta as atualizações de estado emitidas pelo offscreen (tempo real). */
 export function subscribeToDownloadState(listener: (state: DownloadJobState) => void): () => void {
   if (!hasExtensionApi()) return () => {};
